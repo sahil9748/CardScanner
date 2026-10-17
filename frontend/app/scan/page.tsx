@@ -80,10 +80,10 @@ export default function ScanPage() {
 
   // 2. Initialize camera after session is ready
   useEffect(() => {
-    if (!isLoadingSession && !stream) {
+    if (!isLoadingSession) {
       startCamera();
     }
-  }, [isLoadingSession, stream, startCamera]);
+  }, [isLoadingSession, startCamera]);
 
   // Handle capture callback from engine
   const handleEngineCapture = useCallback(
