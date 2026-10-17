@@ -42,9 +42,8 @@
 }
 
 # HTTPS Handler (Port 443)
-# Uses internal self-signed TLS so that Cloudflare "Full" SSL mode
-# completes the SSL/TLS handshake immediately without ACME challenge failures.
-:443 {
+# Explicitly matches 1scan.top, {$DOMAIN}, and fallback :443 with internal TLS
+https://1scan.top, https://{$DOMAIN:localhost}, :443 {
     tls internal
 
     encode zstd gzip
