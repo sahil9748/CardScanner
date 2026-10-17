@@ -96,3 +96,42 @@ def get_current_admin(
         )
 
     return current_staff
+
+
+def get_api_key_auth(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> "ApiKey":
+    """
+    Authenticate third-party integrations using an API key.
+    Checks:
+    1. Header 'X-API-Key'
+    2. Header 'Authorization: Bearer <sk_live_...>'
+    3. Query parameter '?api_key=...' (for direct <img src="..." /> previews)
+    """
+    from app.services.api_key_service import ApiKeyService
+
+    api_key_raw = request.headers.get("x-api-key")
+    if not api_key_raw:
+        auth_header = request.headers.get("authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            api_key_raw = auth_header.split(" ", 1)[1].strip()
+
+    if not api_key_raw:
+        api_key_raw = request.query_params.get("api_key")
+
+    if not api_key_raw:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API Key required. Provide via 'X-API-Key' header, 'Bearer' token, or '?api_key=' parameter.",
+        )
+
+    key_model = ApiKeyService.authenticate_key(db, api_key_raw)
+    if not key_model:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or revoked API key.",
+        )
+
+    return key_model
+

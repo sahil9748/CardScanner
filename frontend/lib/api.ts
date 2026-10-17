@@ -242,4 +242,18 @@ export const api = {
     request<any>(`/admin/users/${userId}`, {
       method: "DELETE",
     }),
+
+  // Admin API Keys (Integrations)
+  listApiKeys: () => request<any[]>("/admin/api-keys"),
+
+  createApiKey: (name: string) =>
+    request<{ id: string; name: string; api_key: string; key_prefix: string; created_at: string }>("/admin/api-keys", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+
+  revokeApiKey: (keyId: string) =>
+    request<any>(`/admin/api-keys/${keyId}`, {
+      method: "DELETE",
+    }),
 };

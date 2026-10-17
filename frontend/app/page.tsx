@@ -1,18 +1,32 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
+import React, { useState, useEffect, useRef, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { CreditCard, Shield, Lock, Delete, ArrowRight, AlertCircle, RefreshCw } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 
-export default function PinEntryPage() {
+function PinEntryContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [pin, setPin] = useState<string>("");
   const [targetLength, setTargetLength] = useState<4 | 5>(4);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [lockoutSeconds, setLockoutSeconds] = useState<number>(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const autoSubmittedRef = useRef<boolean>(false);
+
+  // Auto-detect magic link ?pin=XXXX in URL
+  useEffect(() => {
+    const urlPin = searchParams.get("pin");
+    if (urlPin && /^\d{4,5}$/.test(urlPin) && !autoSubmittedRef.current) {
+      autoSubmittedRef.current = true;
+      const len = urlPin.length as 4 | 5;
+      setTargetLength(len);
+      setPin(urlPin);
+      submitPin(urlPin);
+    }
+  }, [searchParams]);
 
   // Focus input automatically
   useEffect(() => {
@@ -96,6 +110,11 @@ export default function PinEntryPage() {
     try {
       const result = await api.validatePin(pinToSubmit);
       if (result.success) {
+        if (result.redirect_url) {
+          localStorage.setItem("cardscan_redirect_url", result.redirect_url);
+        } else {
+          localStorage.removeItem("cardscan_redirect_url");
+        }
         router.push("/scan");
       }
     } catch (err: any) {
@@ -325,5 +344,19 @@ export default function PinEntryPage() {
         <p>Protected by CardScan Secure Gateway &bull; Keyed HMAC Verification</p>
       </footer>
     </main>
+  );
+}
+
+export default function PinEntryPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center text-indigo-400 font-medium text-sm">
+          Loading CardScan...
+        </div>
+      }
+    >
+      <PinEntryContent />
+    </Suspense>
   );
 }

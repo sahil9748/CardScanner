@@ -5,6 +5,7 @@ from app.models.scan_session import ScanSession
 from app.models.gift_card import GiftCard
 from app.models.gift_card_image import GiftCardImage
 from app.models.audit_log import AuditLog
+from app.models.api_key import ApiKey
 
 __all__ = [
     "Base",
@@ -14,4 +15,5 @@ __all__ = [
     "GiftCard",
     "GiftCardImage",
     "AuditLog",
+    "ApiKey",
 ]

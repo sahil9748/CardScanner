@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "CardScan"
     VERSION: str = "1.0.0"
     API_V1_PREFIX: str = "/api/v1"
+    BASE_URL: str = "https://1scan.top"
 
     # Environment
     ENVIRONMENT: str = "development"

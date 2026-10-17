@@ -26,10 +26,12 @@ import {
   UserPlus,
   UserCheck,
   UserX,
+  Code,
+  ExternalLink,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 
-type AdminTab = "dashboard" | "cards" | "pins" | "audit" | "users";
+type AdminTab = "dashboard" | "cards" | "pins" | "audit" | "users" | "api_keys";
 
 export default function AdminPortal() {
   const router = useRouter();
@@ -98,6 +100,16 @@ export default function AdminPortal() {
   const [newUserRole, setNewUserRole] = useState<"employee" | "admin">("employee");
   const [isCreatingUser, setIsCreatingUser] = useState<boolean>(false);
   const [userError, setUserError] = useState<string | null>(null);
+
+  // API Key Management state (Admin only)
+  const [apiKeys, setApiKeys] = useState<any[]>([]);
+  const [isApiKeysLoading, setIsApiKeysLoading] = useState<boolean>(false);
+  const [showApiKeyModal, setShowApiKeyModal] = useState<boolean>(false);
+  const [newKeyName, setNewKeyName] = useState<string>("");
+  const [isCreatingKey, setIsCreatingKey] = useState<boolean>(false);
+  const [apiKeyError, setApiKeyError] = useState<string | null>(null);
+  const [createdApiKeyData, setCreatedApiKeyData] = useState<any | null>(null);
+  const [showDocsModal, setShowDocsModal] = useState<boolean>(false);
 
   // Check auth session on mount
   useEffect(() => {
@@ -197,6 +209,20 @@ export default function AdminPortal() {
     }
   }, [adminUser]);
 
+  // Fetch API Keys (Admin only)
+  const loadApiKeys = useCallback(async () => {
+    if (adminUser?.role !== "admin") return;
+    setIsApiKeysLoading(true);
+    try {
+      const res = await api.listApiKeys();
+      setApiKeys(res);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsApiKeysLoading(false);
+    }
+  }, [adminUser]);
+
   // Tab switch effect
   useEffect(() => {
     if (!adminUser) return;
@@ -205,7 +231,8 @@ export default function AdminPortal() {
     if (activeTab === "pins") loadPins();
     if (activeTab === "audit") loadAudit();
     if (activeTab === "users" && adminUser.role === "admin") loadUsers();
-  }, [adminUser, activeTab, loadDashboard, loadCards, loadPins, loadAudit, loadUsers]);
+    if (activeTab === "api_keys" && adminUser.role === "admin") loadApiKeys();
+  }, [adminUser, activeTab, loadDashboard, loadCards, loadPins, loadAudit, loadUsers, loadApiKeys]);
 
   // Login handler
   const handleLogin = async (e: React.FormEvent) => {
@@ -326,6 +353,40 @@ export default function AdminPortal() {
       loadUsers();
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  // Create API Key (Admin only)
+  const handleCreateApiKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newKeyName.trim()) return;
+    setIsCreatingKey(true);
+    setApiKeyError(null);
+
+    try {
+      const res = await api.createApiKey(newKeyName.trim());
+      setCreatedApiKeyData(res);
+      setNewKeyName("");
+      loadApiKeys();
+    } catch (err: any) {
+      const apiErr = err as ApiError;
+      setApiKeyError(apiErr.detail || "Failed to create API key");
+    } finally {
+      setIsCreatingKey(false);
+    }
+  };
+
+  // Revoke API Key (Admin only)
+  const handleRevokeApiKey = async (key: any) => {
+    if (!confirm(`Are you sure you want to revoke API key '${key.name}' (${key.key_prefix})? Connected external applications will immediately lose access.`)) {
+      return;
+    }
+    try {
+      await api.revokeApiKey(key.id);
+      loadApiKeys();
+    } catch (err: any) {
+      const apiErr = err as ApiError;
+      alert(apiErr.detail || "Failed to revoke API key");
     }
   };
 
@@ -558,6 +619,22 @@ export default function AdminPortal() {
             >
               <Users className="w-3.5 h-3.5" />
               Users &amp; Roles
+            </button>
+          )}
+
+          {/* API Keys tab: visible to Admins only */}
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => setActiveTab("api_keys")}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 ${
+                activeTab === "api_keys"
+                  ? "bg-indigo-600 text-white shadow-sm"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              <Code className="w-3.5 h-3.5" />
+              API Keys &amp; Integrations
             </button>
           )}
         </nav>
@@ -1081,6 +1158,149 @@ export default function AdminPortal() {
             </div>
           </div>
         )}
+
+        {/* ========================================================= */}
+        {/* TAB 6: API KEYS & INTEGRATIONS (ADMIN ONLY)               */}
+        {/* ========================================================= */}
+        {activeTab === "api_keys" && isAdmin && (
+          <div className="space-y-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap justify-between items-center gap-3">
+              <div>
+                <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Code className="w-4 h-4 text-indigo-400" />
+                  API Keys &amp; Web App Integrations
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Allow your external web applications to generate PINs and preview scanned cards.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDocsModal(true)}
+                  className="py-2 px-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs border border-slate-700 transition-all flex items-center gap-1.5"
+                >
+                  <FileText className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Integration Guide</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreatedApiKeyData(null);
+                    setApiKeyError(null);
+                    setNewKeyName("");
+                    setShowApiKeyModal(true);
+                  }}
+                  className="py-2 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-md transition-all flex items-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Generate New API Key</span>
+                </button>
+              </div>
+            </div>
+
+            {/* API Keys Table */}
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-xl">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-950 border-b border-slate-800 text-slate-400">
+                  <tr>
+                    <th className="py-3.5 px-4 font-semibold">Application Name</th>
+                    <th className="py-3.5 px-4 font-semibold">Key Identifier</th>
+                    <th className="py-3.5 px-4 font-semibold">Status</th>
+                    <th className="py-3.5 px-4 font-semibold">Created Date</th>
+                    <th className="py-3.5 px-4 font-semibold">Last Used</th>
+                    <th className="py-3.5 px-4 font-semibold text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                  {apiKeys.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-8 text-center text-slate-500">
+                        {isApiKeysLoading ? "Loading API keys..." : "No API keys generated yet. Click 'Generate New API Key' above to get started."}
+                      </td>
+                    </tr>
+                  ) : (
+                    apiKeys.map((k) => (
+                      <tr key={k.id} className="hover:bg-slate-800/40 transition-colors">
+                        <td className="py-3.5 px-4 font-semibold text-white">
+                          {k.name}
+                        </td>
+                        <td className="py-3.5 px-4 font-mono text-slate-300">
+                          <span className="px-2 py-1 rounded bg-slate-950 border border-slate-800 text-[11px]">
+                            {k.key_prefix}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                              k.is_active
+                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                : "bg-slate-800 text-slate-400 border border-slate-700"
+                            }`}
+                          >
+                            {k.is_active ? "Active" : "Revoked"}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-400">
+                          {new Date(k.created_at).toLocaleDateString()}
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-400 font-mono text-[11px]">
+                          {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "Never"}
+                        </td>
+                        <td className="py-3.5 px-4 text-right">
+                          {k.is_active ? (
+                            <button
+                              type="button"
+                              onClick={() => handleRevokeApiKey(k)}
+                              className="px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/20 text-[11px] font-medium transition-all"
+                            >
+                              Revoke
+                            </button>
+                          ) : (
+                            <span className="text-[11px] text-slate-600 italic">Revoked</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Integration Quick Reference Card */}
+            <div className="bg-slate-900/60 border border-slate-800 rounded-3xl p-5 sm:p-6">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-400 mb-3 flex items-center gap-2">
+                <Sparkles className="w-4 h-4" />
+                How It Works with Your Other Apps
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs text-slate-300">
+                <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800">
+                  <span className="w-5 h-5 rounded-full bg-indigo-600/30 text-indigo-300 font-bold flex items-center justify-center mb-2">1</span>
+                  <strong className="text-white block mb-1">Generate PIN &amp; Magic Link</strong>
+                  <p className="text-slate-400">
+                    Your other web app calls <code className="text-indigo-300">POST /api/v1/integrations/pins</code> with your API key. It receives a 4-digit PIN and a direct URL <code className="text-indigo-300">https://1scan.top/?pin=XXXX</code>.
+                  </p>
+                </div>
+                <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800">
+                  <span className="w-5 h-5 rounded-full bg-indigo-600/30 text-indigo-300 font-bold flex items-center justify-center mb-2">2</span>
+                  <strong className="text-white block mb-1">Customer Scans Card</strong>
+                  <p className="text-slate-400">
+                    The customer opens the link on their mobile phone, snaps front and back photos without typing, and the server auto-crops the card.
+                  </p>
+                </div>
+                <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800">
+                  <span className="w-5 h-5 rounded-full bg-indigo-600/30 text-indigo-300 font-bold flex items-center justify-center mb-2">3</span>
+                  <strong className="text-white block mb-1">Instant Preview &amp; Webhook</strong>
+                  <p className="text-slate-400">
+                    Your other web app receives the webhook with the card reference code, and displays the image using <code className="text-indigo-300">&lt;img src=&quot;.../images/front?api_key=...&quot;&gt;</code>.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
 
       {/* ========================================================= */}
@@ -1491,6 +1711,213 @@ export default function AdminPortal() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* API KEY CREATION MODAL (Admin Only)                       */}
+      {/* ========================================================= */}
+      {showApiKeyModal && isAdmin && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-2xl">
+            {!createdApiKeyData ? (
+              <>
+                <h2 className="text-xl font-bold text-white mb-1">Generate Integration API Key</h2>
+                <p className="text-xs text-slate-400 mb-6">
+                  Create a secure key for your external web application or backend service.
+                </p>
+
+                <form onSubmit={handleCreateApiKey} className="space-y-4">
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">Application / Service Name</label>
+                    <input
+                      type="text"
+                      required
+                      value={newKeyName}
+                      onChange={(e) => setNewKeyName(e.target.value)}
+                      placeholder="e.g. Shopify Store, Support CRM, Order Backend"
+                      className="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  {apiKeyError && (
+                    <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                      <span>{apiKeyError}</span>
+                    </div>
+                  )}
+
+                  <div className="flex gap-2 pt-3">
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKeyModal(false)}
+                      className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isCreatingKey}
+                      className="flex-2 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md flex items-center justify-center gap-1.5"
+                    >
+                      {isCreatingKey ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                      <span>Generate Key</span>
+                    </button>
+                  </div>
+                </form>
+              </>
+            ) : (
+              <div className="text-center">
+                <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto mb-3">
+                  <Check className="w-6 h-6" />
+                </div>
+                <h2 className="text-xl font-bold text-white mb-1">API Key Generated</h2>
+                <p className="text-xs text-slate-400 mb-5">
+                  Key created for <strong className="text-white">{createdApiKeyData.name}</strong>.
+                </p>
+
+                <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 mb-4 text-left">
+                  <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider block mb-1">
+                    Your Secret API Key
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={createdApiKeyData.api_key}
+                      className="bg-transparent font-mono text-xs text-indigo-300 select-all flex-1 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(createdApiKeyData.api_key);
+                        setCopiedKey(createdApiKeyData.id);
+                        setTimeout(() => setCopiedKey(null), 2500);
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center gap-1.5 shrink-0"
+                    >
+                      {copiedKey === createdApiKeyData.id ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedKey === createdApiKeyData.id ? "Copied" : "Copy"}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs text-left mb-6">
+                  <strong>Important:</strong> Copy this secret key now. For security, it is hashed with SHA-256 and will never be shown to you again.
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowApiKeyModal(false)}
+                  className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold"
+                >
+                  Done
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* INTEGRATION GUIDE MODAL                                   */}
+      {/* ========================================================= */}
+      {showDocsModal && (
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-2xl w-full max-h-[88vh] overflow-y-auto p-6 sm:p-8 shadow-2xl">
+            <div className="flex justify-between items-center mb-5 pb-4 border-b border-slate-800">
+              <div>
+                <span className="text-xs font-bold text-indigo-400 uppercase tracking-wider block mb-1">
+                  Developer Documentation
+                </span>
+                <h2 className="text-xl font-bold text-white">Connecting Your Other Web Apps</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDocsModal(false)}
+                className="text-slate-400 hover:text-slate-200 text-xs px-2.5 py-1.5 rounded-lg border border-slate-800"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="space-y-6 text-xs text-slate-300">
+              {/* Step 1 */}
+              <div>
+                <h3 className="font-bold text-white text-sm mb-2 flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] text-white">1</span>
+                  Generate PIN &amp; Magic Link (From your server)
+                </h3>
+                <p className="text-slate-400 mb-2">
+                  Make a POST request with your API Key to create a customer access PIN:
+                </p>
+                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono text-[11px] text-slate-300 overflow-x-auto">
+                  <pre>{`curl -X POST "https://1scan.top/api/v1/integrations/pins" \\
+  -H "X-API-Key: YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "label": "Order #1042",
+    "card_type": "single",
+    "max_scans": 1,
+    "expires_in_hours": 24,
+    "webhook_url": "https://yourapp.com/webhooks/card-scanned",
+    "redirect_url": "https://yourapp.com/order/1042/success"
+  }'`}</pre>
+                </div>
+              </div>
+
+              {/* Step 2 */}
+              <div>
+                <h3 className="font-bold text-white text-sm mb-2 flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] text-white">2</span>
+                  Send Magic Link to Customer
+                </h3>
+                <p className="text-slate-400 mb-2">
+                  The API response gives you a <code className="text-indigo-300">scan_url</code> (e.g. <code className="text-indigo-300">https://1scan.top/?pin=4829</code>). Give this URL or QR code to your customer. They open it on mobile, the camera opens automatically, and the card is rectified.
+                </p>
+              </div>
+
+              {/* Step 3 */}
+              <div>
+                <h3 className="font-bold text-white text-sm mb-2 flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] text-white">3</span>
+                  Display Card Preview in Your Web App
+                </h3>
+                <p className="text-slate-400 mb-2">
+                  You can directly render the scanned gift card photo in your other app&apos;s HTML / React templates:
+                </p>
+                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono text-[11px] text-slate-300 overflow-x-auto">
+                  <pre>{`<!-- In HTML or React -->
+<img 
+  src="https://1scan.top/api/v1/integrations/cards/{card_id}/images/front?api_key=YOUR_API_KEY"
+  alt="Gift Card Preview"
+  style={{ borderRadius: "12px", width: "100%", maxWidth: "420px" }}
+/>`}</pre>
+                </div>
+              </div>
+
+              {/* Step 4 */}
+              <div>
+                <h3 className="font-bold text-white text-sm mb-2 flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] text-white">4</span>
+                  Real-time Webhook Notification
+                </h3>
+                <p className="text-slate-400 mb-2">
+                  When the customer saves the card, 1scan sends an instant JSON POST payload to your <code className="text-indigo-300">webhook_url</code> containing the card reference code, IDs, and image stream URLs.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-slate-800 text-right">
+              <button
+                type="button"
+                onClick={() => setShowDocsModal(false)}
+                className="py-2 px-5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md"
+              >
+                Close Documentation
+              </button>
+            </div>
           </div>
         </div>
       )}

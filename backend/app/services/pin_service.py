@@ -17,9 +17,13 @@ class PinService:
         db: Session,
         pin_length: int = 4,
         label: Optional[str] = None,
+        card_type: str = "single",
         max_completed_scans: Optional[int] = 1,
         expires_at: Optional[datetime] = None,
         created_by: Optional[str] = None,
+        webhook_url: Optional[str] = None,
+        redirect_url: Optional[str] = None,
+        api_key_id: Optional[str] = None,
     ) -> Tuple[AccessPin, str]:
         """
         Generate a unique cryptographically secure PIN.
@@ -45,10 +49,14 @@ class PinService:
             pin_hmac=hmac_val,
             pin_length=pin_length,
             label=label,
+            card_type=card_type,
             status="active",
             max_completed_scans=max_completed_scans,
             completed_scans=0,
             expires_at=expires_at,
+            webhook_url=webhook_url,
+            redirect_url=redirect_url,
+            api_key_id=api_key_id,
             created_by=created_by,
         )
         db.add(pin_model)

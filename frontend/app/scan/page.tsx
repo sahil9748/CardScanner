@@ -15,6 +15,7 @@ import {
   CreditCard,
   FlipHorizontal,
   Play,
+  ExternalLink,
 } from "lucide-react";
 import confetti from "canvas-confetti";
 import { useCamera } from "@/hooks/useCamera";
@@ -57,6 +58,8 @@ export default function ScanPage() {
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [completedCard, setCompletedCard] = useState<any>(null);
+  const [redirectUrl, setRedirectUrl] = useState<string | null>(null);
+  const [redirectCountdown, setRedirectCountdown] = useState<number | null>(null);
 
   // Hidden offscreen canvases for instant snapshot extraction
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -68,6 +71,13 @@ export default function ScanPage() {
         const sessionData = await api.getCurrentSession();
         setSession(sessionData);
         setCardType(sessionData.card_type as "single" | "double");
+
+        const targetRedirect =
+          sessionData.redirect_url ||
+          (typeof window !== "undefined" ? localStorage.getItem("cardscan_redirect_url") : null);
+        if (targetRedirect) {
+          setRedirectUrl(targetRedirect);
+        }
       } catch (err) {
         // Unauthenticated -> redirect to PIN page
         router.push("/");
@@ -77,6 +87,24 @@ export default function ScanPage() {
     }
     initSession();
   }, [router]);
+
+  // Handle auto-redirect countdown upon completion
+  useEffect(() => {
+    if (step === "completed" && redirectUrl) {
+      setRedirectCountdown(5);
+      const interval = setInterval(() => {
+        setRedirectCountdown((prev) => {
+          if (prev === null || prev <= 1) {
+            clearInterval(interval);
+            window.location.href = redirectUrl;
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+      return () => clearInterval(interval);
+    }
+  }, [step, redirectUrl]);
 
   // 2. Initialize camera once session is verified
   useEffect(() => {
@@ -244,6 +272,9 @@ export default function ScanPage() {
       // 3. Complete Session
       const completed = await api.completeSession(activeSessionId);
       setCompletedCard(completed);
+      if ((completed as any)?.redirect_url) {
+        setRedirectUrl((completed as any).redirect_url);
+      }
       setStep("completed");
 
       // Confetti celebration
@@ -262,6 +293,7 @@ export default function ScanPage() {
 
   // Restart scan workflow for another card
   const handleScanAnother = async () => {
+    setRedirectCountdown(null);
     setFrontCapture(null);
     setBackCapture(null);
     setCompletedCard(null);
@@ -695,6 +727,18 @@ export default function ScanPage() {
             </div>
 
             <div className="flex flex-col gap-2.5">
+              {redirectUrl && (
+                <a
+                  href={redirectUrl}
+                  className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-lg shadow-emerald-600/30 transition-all flex items-center justify-center gap-2 active:scale-95"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>
+                    Return to App / Order {redirectCountdown !== null && redirectCountdown > 0 ? `(${redirectCountdown}s)` : ""}
+                  </span>
+                </a>
+              )}
+
               <button
                 type="button"
                 onClick={handleScanAnother}

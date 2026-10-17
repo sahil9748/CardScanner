@@ -10,6 +10,7 @@ from app.models.scan_session import ScanSession
 from app.models.gift_card_image import GiftCardImage
 from app.services.session_service import SessionService
 from app.services.card_service import CardService
+from app.services.webhook_service import WebhookService
 from app.storage.factory import get_storage
 from app.schemas.session import SessionResponse, SessionInitRequest, CompleteSessionResponse
 from app.core.config import settings
@@ -47,6 +48,7 @@ def _format_session_response(session: ScanSession) -> dict:
         "completed_at": session.completed_at.isoformat() if session.completed_at else None,
         "pin_label": session.access_pin.label if session.access_pin else None,
         "remaining_scans": remaining,
+        "redirect_url": getattr(session.access_pin, "redirect_url", None) if session.access_pin else None,
         "images": images_info,
     }
 
@@ -264,12 +266,37 @@ def complete_session(
 
     card = CardService.complete_scan_session(db, target_session)
 
+    # If the AccessPin was provisioned with a webhook_url, fire event asynchronously
+    if target_session.access_pin and target_session.access_pin.webhook_url:
+        images_payload = {}
+        for img in card.images:
+            images_payload[img.side] = {
+                "preview_url": f"{settings.BASE_URL}/api/v1/integrations/cards/{card.id}/images/{img.side}",
+                "original_url": f"{settings.BASE_URL}/api/v1/integrations/cards/{card.id}/images/{img.side}/original",
+                "width": img.processed_width,
+                "height": img.processed_height,
+                "file_size": img.file_size,
+                "mime_type": img.mime_type,
+            }
+        WebhookService.trigger_card_scanned(
+            webhook_url=target_session.access_pin.webhook_url,
+            pin=target_session.access_pin.label or "PIN",
+            pin_label=target_session.access_pin.label or "",
+            card_id=card.id,
+            reference_code=card.reference_code,
+            card_type=card.card_type,
+            images_dict=images_payload,
+            base_url=settings.BASE_URL,
+            timestamp=card.created_at.isoformat(),
+        )
+
     return {
         "success": True,
         "session_id": target_session.id,
         "gift_card_id": card.id,
         "reference_code": card.reference_code,
         "status": "completed",
+        "redirect_url": getattr(target_session.access_pin, "redirect_url", None) if target_session.access_pin else None,
         "message": "Card scan saved successfully!",
     }
 

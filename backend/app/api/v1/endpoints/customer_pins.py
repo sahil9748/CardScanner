@@ -24,11 +24,12 @@ def validate_pin(
     client_ip = get_client_ip(request)
     pin = PinService.validate_and_claim_pin(db, pin=payload.pin, client_ip=client_ip)
 
-    # Create new scanning session
+    # Create new scanning session honoring PIN's configured card_type
+    initial_card_type = getattr(pin, "card_type", None) or "single"
     session = SessionService.create_session_for_pin(
         db=db,
         pin=pin,
-        card_type="single",
+        card_type=initial_card_type,
         client_ip=client_ip,
     )
 
@@ -59,5 +60,5 @@ def validate_pin(
         "expires_at": session.expires_at.isoformat(),
         "pin_label": pin.label,
         "remaining_scans": remaining,
-        "redirect_url": "/scan",
+        "redirect_url": getattr(pin, "redirect_url", None),
     }
