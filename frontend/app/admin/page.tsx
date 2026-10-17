@@ -79,6 +79,7 @@ export default function AdminPortal() {
   const [batchCount, setBatchCount] = useState<number>(5);
   const [isGeneratingPin, setIsGeneratingPin] = useState<boolean>(false);
   const [generatedResult, setGeneratedResult] = useState<any>(null);
+  const [pinError, setPinError] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   // Audit logs state
@@ -235,6 +236,7 @@ export default function AdminPortal() {
   // Handle PIN generation (Accessible to admin and employees)
   const handleGeneratePin = async () => {
     setIsGeneratingPin(true);
+    setPinError(null);
     try {
       if (isBatchMode) {
         const res = await api.createBatchPins({
@@ -253,8 +255,9 @@ export default function AdminPortal() {
         setGeneratedResult(res);
       }
       loadPins();
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      console.error("PIN Generation Error:", e);
+      setPinError(e.detail || e.message || "Failed to generate PIN. Please check connection and permissions.");
     } finally {
       setIsGeneratingPin(false);
     }
@@ -1353,6 +1356,13 @@ export default function AdminPortal() {
                       onChange={(e) => setBatchCount(parseInt(e.target.value, 10) || 5)}
                       className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white"
                     />
+                  </div>
+                )}
+
+                {pinError && (
+                  <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                    <span>{pinError}</span>
                   </div>
                 )}
 

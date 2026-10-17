@@ -5,10 +5,30 @@ export interface ApiError {
 
 const API_BASE = "/api/v1";
 
+let adminToken: string | null = null;
+if (typeof window !== "undefined") {
+  adminToken = localStorage.getItem("cardscan_admin_token");
+}
+
+export function setAdminToken(token: string | null) {
+  adminToken = token;
+  if (typeof window !== "undefined") {
+    if (token) {
+      localStorage.setItem("cardscan_admin_token", token);
+    } else {
+      localStorage.removeItem("cardscan_admin_token");
+    }
+  }
+}
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   if (!headers.has("Content-Type") && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
+  }
+
+  if (adminToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${adminToken}`);
   }
 
   const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -101,16 +121,23 @@ export const api = {
     }),
 
   // Admin Auth
-  adminLogin: (email: string, password: string) =>
-    request<{ success: boolean; token: string; user: any }>("/admin/auth/login", {
+  adminLogin: async (email: string, password: string) => {
+    const res = await request<{ success: boolean; token: string; user: any }>("/admin/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
-    }),
+    });
+    if (res.token) {
+      setAdminToken(res.token);
+    }
+    return res;
+  },
 
-  adminLogout: () =>
-    request<{ success: boolean; message: string }>("/admin/auth/logout", {
+  adminLogout: async () => {
+    setAdminToken(null);
+    return request<{ success: boolean; message: string }>("/admin/auth/logout", {
       method: "POST",
-    }),
+    });
+  },
 
   getAdminProfile: () => request<any>("/admin/auth/me"),
 
