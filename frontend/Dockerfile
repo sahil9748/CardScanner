@@ -6,7 +6,10 @@ COPY package*.json ./
 RUN npm install --legacy-peer-deps
 
 COPY . .
+
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_CPU_COUNT=1
+ENV NODE_OPTIONS="--max-old-space-size=768"
 RUN npm run build
 
 FROM node:22-alpine AS runner

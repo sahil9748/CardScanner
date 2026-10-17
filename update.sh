@@ -29,7 +29,28 @@ get_compose_cmd() {
     fi
 }
 
+ensure_swap() {
+    if [ -f /proc/meminfo ] && [ "$EUID" -eq 0 ]; then
+        SWAP_KB=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
+        if [ "$SWAP_KB" -lt 1048576 ]; then
+            log_info "Low swap detected ($((SWAP_KB / 1024))MB on 1GB VPS). Enabling 2GB swap to prevent build freezes..."
+            if [ ! -f /swapfile ]; then
+                fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+                chmod 600 /swapfile
+                mkswap /swapfile
+                swapon /swapfile || true
+                if ! grep -q '/swapfile' /etc/fstab; then
+                    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+                fi
+                log_success "2GB swapfile enabled successfully."
+            fi
+        fi
+    fi
+}
+
 echo -e "\n${CYAN}${BOLD}=== CardScan: Pulling Latest Updates & Rebuilding ===${NC}\n"
+
+ensure_swap
 
 # 1. Verify Git and Pull Latest Commits
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then

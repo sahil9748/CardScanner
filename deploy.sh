@@ -94,6 +94,24 @@ install_docker_if_needed() {
         log_error "Could not locate or install Docker Compose. Please install Docker Compose and re-run."
         exit 1
     fi
+
+    # Ensure swap on low-memory VPS (prevents 1GB RAM build freezes)
+    if [ -f /proc/meminfo ] && [ "$EUID" -eq 0 ]; then
+        SWAP_KB=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
+        if [ "$SWAP_KB" -lt 1048576 ]; then
+            log_info "Low swap detected ($((SWAP_KB / 1024))MB on 1GB VPS). Enabling 2GB swap..."
+            if [ ! -f /swapfile ]; then
+                fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+                chmod 600 /swapfile
+                mkswap /swapfile
+                swapon /swapfile || true
+                if ! grep -q '/swapfile' /etc/fstab; then
+                    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+                fi
+                log_success "2GB swapfile enabled successfully."
+            fi
+        fi
+    fi
 }
 
 setup_environment() {
