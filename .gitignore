@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Next.js build output
+frontend/.next/
+frontend/out/
+.next/
+out/
+
+# Database & Uploads
+*.db
+*.sqlite
+*.sqlite3
+uploads/
+backend/uploads/
+cardscan_uploads/
+postgres_data/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs & Testing
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE & OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Caddy & SSL certs
+caddy_data/
+caddy_config/
+*.pem
+*.key
+

@@ -1,0 +1,79 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: cardscan-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cardscan}
+      POSTGRES_USER: ${POSTGRES_USER:-cardscan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cardscan_secure_password_replace_in_prod}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cardscan} -d ${POSTGRES_DB:-cardscan}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cardscan-backend
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DEBUG: ${DEBUG:-false}
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-cardscan}:${POSTGRES_PASSWORD:-cardscan_secure_password_replace_in_prod}@db:5432/${POSTGRES_DB:-cardscan}
+      SECRET_KEY: ${SECRET_KEY}
+      PIN_HMAC_SECRET: ${PIN_HMAC_SECRET}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      LOCAL_STORAGE_DIR: /app/uploads
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SAMESITE: lax
+      SESSION_EXPIRY_MINUTES: ${SESSION_EXPIRY_MINUTES:-30}
+      ADMIN_SESSION_EXPIRY_HOURS: ${ADMIN_SESSION_EXPIRY_HOURS:-12}
+    volumes:
+      - cardscan_uploads:/app/uploads
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cardscan-frontend
+    restart: always
+    depends_on:
+      - backend
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      BACKEND_URL: http://backend:8000
+
+  proxy:
+    image: caddy:2-alpine
+    container_name: cardscan-proxy
+    restart: always
+    depends_on:
+      - backend
+      - frontend
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@cardscan.local}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  cardscan_uploads:
+  caddy_data:
+  caddy_config:
