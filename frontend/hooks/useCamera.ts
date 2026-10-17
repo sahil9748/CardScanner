@@ -17,12 +17,13 @@ export function useCamera() {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const selectedDeviceIdRef = useRef<string>("");
   const isStartingRef = useRef<boolean>(false);
 
-  // Keep streamRef in sync with stream state
+  // Sync selectedDeviceIdRef with state
   useEffect(() => {
-    streamRef.current = stream;
-  }, [stream]);
+    selectedDeviceIdRef.current = selectedDeviceId;
+  }, [selectedDeviceId]);
 
   // Clean track shutdown
   const stopStream = useCallback(() => {
@@ -37,7 +38,7 @@ export function useCamera() {
     setStream(null);
   }, []);
 
-  // Enumerate cameras
+  // Enumerate cameras without auto-switching active stream
   const refreshDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) return;
     try {
@@ -49,20 +50,23 @@ export function useCamera() {
           label: d.label || `Camera ${index + 1}`,
         }));
       setDevices(videoDevices);
-      if (videoDevices.length > 0 && !selectedDeviceId) {
-        // Prefer back camera if found on mobile
+
+      // Only set initial selectedDeviceId display value if empty, without restarting stream
+      if (videoDevices.length > 0 && !selectedDeviceIdRef.current) {
         const backCam = videoDevices.find((d) => {
           const l = d.label.toLowerCase();
-          return l.includes("back") || l.includes("environment") || l.includes("rear");
+          return l.includes("back") || l.includes("environment") || l.includes("rear") || l.includes("triple");
         });
-        setSelectedDeviceId(backCam ? backCam.deviceId : videoDevices[0].deviceId);
+        const chosenId = backCam ? backCam.deviceId : videoDevices[0].deviceId;
+        selectedDeviceIdRef.current = chosenId;
+        setSelectedDeviceId(chosenId);
       }
     } catch (e) {
       console.warn("Could not enumerate camera devices:", e);
     }
-  }, [selectedDeviceId]);
+  }, []);
 
-  // Start camera stream (Safe for iOS Safari and mobile WebKit)
+  // Start camera stream - 100% STABLE identity, safe for iOS WebKit & Android
   const startCamera = useCallback(async (preferredDeviceId?: string) => {
     if (!navigator.mediaDevices?.getUserMedia) {
       setError("Camera API is not supported in this browser. HTTPS may be required.");
@@ -78,7 +82,7 @@ export function useCamera() {
     setError(null);
     setIsPermissionDenied(false);
 
-    // Stop existing stream tracks first
+    // Stop existing stream first if switching devices
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => {
         try {
@@ -88,14 +92,14 @@ export function useCamera() {
       streamRef.current = null;
     }
 
-    const deviceId = preferredDeviceId || selectedDeviceId;
+    const deviceId = preferredDeviceId || selectedDeviceIdRef.current;
 
-    // Use ideal dimensions without min bounds for mobile compatibility
+    // Use ideal constraints (never 'exact' on iOS Safari to prevent OverconstrainedError)
     const constraints: MediaStreamConstraints = {
       audio: false,
       video: deviceId
         ? {
-            deviceId: { exact: deviceId },
+            deviceId: { ideal: deviceId },
             width: { ideal: 1920 },
             height: { ideal: 1080 },
           }
@@ -111,29 +115,35 @@ export function useCamera() {
       streamRef.current = mediaStream;
       setStream(mediaStream);
 
-      // Safe video attachment for iOS Safari
+      // Attach and play safely on video element
       const video = videoRef.current;
       if (video) {
         video.srcObject = mediaStream;
-        const playSafe = () => {
+        video.setAttribute("playsinline", "true");
+        video.setAttribute("webkit-playsinline", "true");
+
+        const tryPlay = () => {
           video.play().catch((playErr) => {
             if (playErr.name !== "AbortError") {
-              console.warn("Autoplay notice:", playErr);
+              console.warn("Video play notice:", playErr);
             }
           });
         };
 
-        if (video.readyState >= 1) {
-          playSafe();
+        if (video.readyState >= 2) {
+          tryPlay();
         } else {
-          video.addEventListener("loadedmetadata", playSafe, { once: true });
+          video.onloadedmetadata = () => {
+            tryPlay();
+          };
         }
       }
 
       await refreshDevices();
     } catch (err: any) {
       console.error("Camera access error:", err);
-      // Ignore AbortError if stream was actually obtained or cancelled by quick re-render
+
+      // Benign AbortError on mobile during render cycle - ignore if stream exists
       if (err.name === "AbortError" && streamRef.current) {
         return;
       }
@@ -146,8 +156,7 @@ export function useCamera() {
       } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
         setError("Camera is currently in use by another application. Please close other camera apps and retry.");
       } else if (err.name === "AbortError") {
-        // Retry once on mobile WebKit abort
-        console.warn("Retrying camera initialization after WebKit abort...");
+        console.warn("Retrying camera once after WebKit abort...");
         setTimeout(() => {
           isStartingRef.current = false;
           startCamera(preferredDeviceId);
@@ -160,33 +169,37 @@ export function useCamera() {
       setIsLoading(false);
       isStartingRef.current = false;
     }
-  }, [selectedDeviceId, refreshDevices]);
+  }, [refreshDevices]);
 
-  // Synchronize stream with video element
+  // Keep video ref updated when stream changes
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !stream) return;
 
     if (video.srcObject !== stream) {
       video.srcObject = stream;
+      video.setAttribute("playsinline", "true");
+      video.setAttribute("webkit-playsinline", "true");
     }
 
-    const handlePlay = () => {
+    const playSafe = () => {
       video.play().catch((err) => {
         if (err.name !== "AbortError") {
-          console.warn("Video play error:", err);
+          console.warn("Autoplay notice:", err);
         }
       });
     };
 
-    if (video.readyState >= 1) {
-      handlePlay();
+    if (video.readyState >= 2) {
+      playSafe();
     } else {
-      video.addEventListener("loadedmetadata", handlePlay, { once: true });
+      video.onloadedmetadata = () => {
+        playSafe();
+      };
     }
   }, [stream]);
 
-  // Cleanup on unmount
+  // Clean cleanup on component unmount
   useEffect(() => {
     return () => {
       if (streamRef.current) {
