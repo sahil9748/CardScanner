@@ -264,6 +264,7 @@ show_completion_summary() {
     echo -e "  - Manage employees in: ${CYAN}${BASE_URL}/admin${NC} -> ${BOLD}Users & Roles${NC} tab.\n"
 
     echo -e "${BOLD}Useful Management Commands:${NC}"
+    echo -e "  Update app:      ${CYAN}./update.sh${NC} (Pulls git commits, rebuilds containers, runs migrations)"
     echo -e "  View status:     ${CYAN}${COMPOSE_CMD} ps${NC}"
     echo -e "  View live logs:  ${CYAN}${COMPOSE_CMD} logs -f${NC}"
     echo -e "  Restart stack:   ${CYAN}${COMPOSE_CMD} restart${NC}"

@@ -109,6 +109,33 @@ chmod +x deploy.sh
 5. **Runs Database Migrations** (`alembic upgrade head`).
 6. **Bootstraps the Initial Admin User**.
 
+### Updating Your Deployment When Pushing Changes
+
+Whenever you push new code to GitHub, update your VPS deployment using either of the following methods:
+
+#### Option A: One-Command Update on the VPS (Recommended)
+SSH into your VPS and run:
+```bash
+cd CardScanner
+./update.sh
+```
+What `update.sh` does:
+- Pulls the latest commits from GitHub (`git pull origin main`).
+- Automatically rebuilds only the updated containers (`docker compose up -d --build`).
+- Runs any new database migrations (`alembic upgrade head`).
+- Automatically prunes dangling images to reclaim VPS disk space.
+- Verifies health check status.
+
+#### Option B: Fully Automated Push-to-Deploy via GitHub Actions
+A pre-configured GitHub Actions workflow is included at `.github/workflows/deploy.yml`. To enable zero-touch auto-deployment whenever you run `git push origin main`:
+1. In your GitHub repository, go to **Settings > Secrets and variables > Actions**.
+2. Add the following repository secrets:
+   - `VPS_HOST`: Your VPS IP address or hostname.
+   - `VPS_USERNAME`: SSH user (e.g., `root` or `ubuntu`).
+   - `VPS_SSH_KEY`: Private SSH key configured on your VPS.
+   - `VPS_APP_DIR` *(Optional)*: Path to the CardScanner folder on your VPS (defaults to `~/CardScanner`).
+3. Now, every push to `main` will automatically test your code and deploy it to your VPS without logging in!
+
 ---
 
 ## 4. Local Development Quickstart
@@ -286,7 +313,15 @@ CardScanner/
 │   ├── package.json
 │   ├── vitest.config.ts
 │   └── Dockerfile
-├── docker-compose.yml        # PostgreSQL, Backend, Frontend orchestration
+├── .github/
+│   └── workflows/
+│       └── deploy.yml        # Automated CI & optional push-to-deploy workflow
+├── deploy/
+│   ├── caddy/Caddyfile       # Caddy reverse proxy with automatic SSL
+│   └── nginx/nginx.conf      # Optional Nginx alternative configuration
+├── deploy.sh                 # Turnkey initial one-click VPS deployment script
+├── update.sh                 # One-command VPS update script (git pull & rebuild)
+├── docker-compose.yml        # PostgreSQL, Backend, Frontend, Caddy orchestration
 ├── .env.example              # Documented configuration variables
 └── README.md
 ```
