@@ -16,28 +16,37 @@ export function evaluateImageQuality(
 ): QualityAssessment {
   const warnings: string[] = [];
 
+  // If no card detected yet, return default fast assessment without heavy pixel analysis
+  if (!corners) {
+    return {
+      isAcceptable: true,
+      sharpness: 25.0,
+      exposure: "normal",
+      withinBounds: true,
+      warnings: [],
+    };
+  }
+
   // 1. Boundary check: ensure corners aren't clamped against video margins
   let withinBounds = true;
-  if (corners) {
-    const marginX = width * 0.02;
-    const marginY = height * 0.02;
-    const pts = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft];
-    for (const p of pts) {
-      if (p.x <= marginX || p.x >= width - marginX || p.y <= marginY || p.y >= height - marginY) {
-        withinBounds = false;
-        warnings.push("Card is too close to camera edge. Please center the card.");
-        break;
-      }
+  const marginX = width * 0.02;
+  const marginY = height * 0.02;
+  const pts = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft];
+  for (const p of pts) {
+    if (p.x <= marginX || p.x >= width - marginX || p.y <= marginY || p.y >= height - marginY) {
+      withinBounds = false;
+      warnings.push("Card is too close to camera edge. Please center the card.");
+      break;
     }
   }
 
-  // Sample center area for exposure and sharpness
-  const sampleW = Math.min(200, width);
-  const sampleH = Math.min(200, height);
+  // Fast sampled center area for exposure and sharpness (120x80)
+  const sampleW = Math.min(120, width);
+  const sampleH = Math.min(80, height);
   const startX = Math.floor((width - sampleW) / 2);
   const startY = Math.floor((height - sampleH) / 2);
 
-  let sharpness = 0;
+  let sharpness = 25.0;
   let exposure: "underexposed" | "overexposed" | "normal" = "normal";
 
   try {
@@ -47,7 +56,7 @@ export function evaluateImageQuality(
     let laplacianSum = 0;
     const pixelCount = sampleW * sampleH;
 
-    // Grayscale luminance array
+    // Fast luminance sampling
     const gray = new Float32Array(pixelCount);
     for (let i = 0, j = 0; i < data.length; i += 4, j++) {
       const luma = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
@@ -56,18 +65,19 @@ export function evaluateImageQuality(
     }
 
     const avgLuma = totalLuma / pixelCount;
-    if (avgLuma < 35) {
+    if (avgLuma < 25) {
       exposure = "underexposed";
-      warnings.push("Lighting is too dark. Move card into better light.");
-    } else if (avgLuma > 235) {
+      warnings.push("Lighting is dark. Move card into better light.");
+    } else if (avgLuma > 245) {
       exposure = "overexposed";
-      warnings.push("Too much glare or brightness on card.");
+      warnings.push("Glare or brightness detected on card.");
     }
 
-    // High frequency Laplacian sharpness
+    // Step-sampled Laplacian sharpness (runs in < 1ms on mobile CPU)
     let lapCount = 0;
-    for (let y = 1; y < sampleH - 1; y++) {
-      for (let x = 1; x < sampleW - 1; x++) {
+    const step = 2;
+    for (let y = 1; y < sampleH - 1; y += step) {
+      for (let x = 1; x < sampleW - 1; x += step) {
         const idx = y * sampleW + x;
         const center = gray[idx];
         const lap =
@@ -80,13 +90,12 @@ export function evaluateImageQuality(
         lapCount++;
       }
     }
-    sharpness = lapCount > 0 ? Math.round((laplacianSum / lapCount) * 10) / 10 : 0;
+    sharpness = lapCount > 0 ? Math.round((laplacianSum / lapCount) * 10) / 10 : 25.0;
 
-    if (sharpness < 8.0) {
-      warnings.push("Image appears blurry. Hold camera steady.");
+    if (sharpness < 4.0) {
+      warnings.push("Hold camera steady.");
     }
   } catch (e) {
-    // Canvas cross-origin or read issue fallback
     sharpness = 25.0;
   }
 

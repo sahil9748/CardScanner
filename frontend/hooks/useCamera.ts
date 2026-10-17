@@ -12,6 +12,7 @@ export function useCamera() {
   const [devices, setDevices] = useState<CameraDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [isPermissionDenied, setIsPermissionDenied] = useState<boolean>(false);
 
@@ -36,6 +37,7 @@ export function useCamera() {
       streamRef.current = null;
     }
     setStream(null);
+    setIsPlaying(false);
   }, []);
 
   // Enumerate cameras without auto-switching active stream
@@ -51,7 +53,7 @@ export function useCamera() {
         }));
       setDevices(videoDevices);
 
-      // Only set initial selectedDeviceId display value if empty, without restarting stream
+      // Only set initial selectedDeviceId display value if empty
       if (videoDevices.length > 0 && !selectedDeviceIdRef.current) {
         const backCam = videoDevices.find((d) => {
           const l = d.label.toLowerCase();
@@ -66,7 +68,79 @@ export function useCamera() {
     }
   }, []);
 
-  // Start camera stream - 100% STABLE identity, safe for iOS WebKit & Android
+  // Configure video element for iOS Safari WebKit inline playback
+  const configureVideoElement = useCallback((video: HTMLVideoElement, mediaStream: MediaStream) => {
+    // Crucial properties for iOS Safari WebKit
+    video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
+    video.setAttribute("playsinline", "true");
+    video.setAttribute("webkit-playsinline", "true");
+    video.setAttribute("muted", "true");
+    video.setAttribute("autoplay", "true");
+
+    if (video.srcObject !== mediaStream) {
+      video.srcObject = mediaStream;
+    }
+
+    const tryPlay = () => {
+      video.muted = true;
+      video.playsInline = true;
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            setIsPlaying(true);
+            setIsLoading(false);
+          })
+          .catch((playErr) => {
+            if (playErr.name !== "AbortError") {
+              console.warn("Video play notice:", playErr);
+            }
+          });
+      }
+    };
+
+    tryPlay();
+
+    // Event listeners
+    const handleLoadedMetadata = () => tryPlay();
+    const handleCanPlay = () => tryPlay();
+    const handlePlaying = () => {
+      setIsPlaying(true);
+      setIsLoading(false);
+    };
+    const handlePause = () => setIsPlaying(false);
+
+    video.addEventListener("loadedmetadata", handleLoadedMetadata);
+    video.addEventListener("canplay", handleCanPlay);
+    video.addEventListener("playing", handlePlaying);
+    video.addEventListener("pause", handlePause);
+
+    return () => {
+      video.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      video.removeEventListener("canplay", handleCanPlay);
+      video.removeEventListener("playing", handlePlaying);
+      video.removeEventListener("pause", handlePause);
+    };
+  }, []);
+
+  // Manual resume function for user touch gesture fallback
+  const resumeVideo = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video) return;
+    try {
+      video.muted = true;
+      video.playsInline = true;
+      await video.play();
+      setIsPlaying(true);
+      setIsLoading(false);
+    } catch (e) {
+      console.warn("Manual video play attempt:", e);
+    }
+  }, []);
+
+  // Start camera stream - rock-solid for iOS WebKit & Android
   const startCamera = useCallback(async (preferredDeviceId?: string) => {
     if (!navigator.mediaDevices?.getUserMedia) {
       setError("Camera API is not supported in this browser. HTTPS may be required.");
@@ -92,21 +166,21 @@ export function useCamera() {
       streamRef.current = null;
     }
 
-    const deviceId = preferredDeviceId || selectedDeviceIdRef.current;
+    const targetDeviceId = preferredDeviceId || selectedDeviceIdRef.current;
 
-    // Use ideal constraints (never 'exact' on iOS Safari to prevent OverconstrainedError)
+    // Use ideal constraints (avoid 'exact' on iOS Safari to prevent OverconstrainedError)
     const constraints: MediaStreamConstraints = {
       audio: false,
-      video: deviceId
+      video: targetDeviceId
         ? {
-            deviceId: { ideal: deviceId },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
+            deviceId: { ideal: targetDeviceId },
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 },
           }
         : {
             facingMode: { ideal: "environment" },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 },
           },
     };
 
@@ -115,28 +189,10 @@ export function useCamera() {
       streamRef.current = mediaStream;
       setStream(mediaStream);
 
-      // Attach and play safely on video element
+      // Attach immediately to video element
       const video = videoRef.current;
       if (video) {
-        video.srcObject = mediaStream;
-        video.setAttribute("playsinline", "true");
-        video.setAttribute("webkit-playsinline", "true");
-
-        const tryPlay = () => {
-          video.play().catch((playErr) => {
-            if (playErr.name !== "AbortError") {
-              console.warn("Video play notice:", playErr);
-            }
-          });
-        };
-
-        if (video.readyState >= 2) {
-          tryPlay();
-        } else {
-          video.onloadedmetadata = () => {
-            tryPlay();
-          };
-        }
+        configureVideoElement(video, mediaStream);
       }
 
       await refreshDevices();
@@ -169,35 +225,23 @@ export function useCamera() {
       setIsLoading(false);
       isStartingRef.current = false;
     }
-  }, [refreshDevices]);
+  }, [refreshDevices, configureVideoElement]);
 
-  // Keep video ref updated when stream changes
+  // Select a new device and restart camera
+  const selectDevice = useCallback(async (newDeviceId: string) => {
+    setSelectedDeviceId(newDeviceId);
+    selectedDeviceIdRef.current = newDeviceId;
+    await startCamera(newDeviceId);
+  }, [startCamera]);
+
+  // Keep video ref updated whenever stream or video element becomes available
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !stream) return;
 
-    if (video.srcObject !== stream) {
-      video.srcObject = stream;
-      video.setAttribute("playsinline", "true");
-      video.setAttribute("webkit-playsinline", "true");
-    }
-
-    const playSafe = () => {
-      video.play().catch((err) => {
-        if (err.name !== "AbortError") {
-          console.warn("Autoplay notice:", err);
-        }
-      });
-    };
-
-    if (video.readyState >= 2) {
-      playSafe();
-    } else {
-      video.onloadedmetadata = () => {
-        playSafe();
-      };
-    }
-  }, [stream]);
+    const cleanup = configureVideoElement(video, stream);
+    return cleanup;
+  }, [stream, configureVideoElement]);
 
   // Clean cleanup on component unmount
   useEffect(() => {
@@ -218,10 +262,13 @@ export function useCamera() {
     devices,
     selectedDeviceId,
     setSelectedDeviceId,
+    selectDevice,
     isLoading,
+    isPlaying,
     error,
     isPermissionDenied,
     startCamera,
+    resumeVideo,
     stopStream,
   };
 }

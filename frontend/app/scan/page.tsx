@@ -17,6 +17,7 @@ import {
   X,
   FlipHorizontal,
   ChevronRight,
+  Play,
 } from "lucide-react";
 import confetti from "canvas-confetti";
 import { useCamera } from "@/hooks/useCamera";
@@ -28,11 +29,24 @@ type ScanStep = "scanning_front" | "review_front" | "awaiting_back" | "scanning_
 
 export default function ScanPage() {
   const router = useRouter();
-  const { videoRef, stream, devices, selectedDeviceId, setSelectedDeviceId, error: cameraError, isPermissionDenied, startCamera, stopStream } = useCamera();
+  const {
+    videoRef,
+    stream,
+    devices,
+    selectedDeviceId,
+    selectDevice,
+    isLoading: isCameraLoading,
+    isPlaying,
+    error: cameraError,
+    isPermissionDenied,
+    startCamera,
+    resumeVideo,
+    stopStream,
+  } = useCamera();
 
   // Session state
   const [session, setSession] = useState<any>(null);
-  const [isLoadingSession, setIsLoadingLoading] = useState<boolean>(true);
+  const [isLoadingSession, setIsLoadingSession] = useState<boolean>(true);
   const [cardType, setCardType] = useState<"single" | "double">("single");
 
   // Workflow step
@@ -46,12 +60,12 @@ export default function ScanPage() {
   const [detection, setDetection] = useState<DetectionResult>({
     detected: false,
     state: "searching",
-    stateMessage: "Initializing camera...",
+    stateMessage: "Position card inside frame",
     corners: null,
     confidence: 0,
     stabilityProgress: 0,
     aspectRatio: 1.586,
-    sharpness: 0,
+    sharpness: 25,
   });
 
   const [isUploading, setIsUploading] = useState<boolean>(false);
@@ -60,6 +74,16 @@ export default function ScanPage() {
 
   const engineRef = useRef<CardScanningEngine | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Keep live step and cardType in refs so engine callbacks never become stale
+  const stepRef = useRef<ScanStep>(step);
+  const cardTypeRef = useRef<"single" | "double">(cardType);
+  useEffect(() => {
+    stepRef.current = step;
+  }, [step]);
+  useEffect(() => {
+    cardTypeRef.current = cardType;
+  }, [cardType]);
 
   // 1. Load active session
   useEffect(() => {
@@ -72,13 +96,13 @@ export default function ScanPage() {
         // Unauthenticated -> redirect to PIN page
         router.push("/");
       } finally {
-        setIsLoadingLoading(false);
+        setIsLoadingSession(false);
       }
     }
     initSession();
   }, [router]);
 
-  // 2. Initialize camera after session is ready
+  // 2. Initialize camera once session is verified
   useEffect(() => {
     if (!isLoadingSession) {
       startCamera();
@@ -86,37 +110,44 @@ export default function ScanPage() {
   }, [isLoadingSession, startCamera]);
 
   // Handle capture callback from engine
-  const handleEngineCapture = useCallback(
-    async (payload: CapturePayload) => {
-      if (step === "scanning_front") {
-        setFrontCapture(payload);
-        if (cardType === "single") {
-          setStep("review_front");
-        } else {
-          // Double-sided: transition to flip step
-          setStep("awaiting_back");
-        }
-      } else if (step === "scanning_back") {
-        setBackCapture(payload);
-        setStep("review_both");
-      }
-    },
-    [step, cardType]
-  );
+  const handleEngineCapture = useCallback((payload: CapturePayload) => {
+    const curStep = stepRef.current;
+    const curType = cardTypeRef.current;
 
-  // 3. Initialize Vision Engine
+    if (curStep === "scanning_front") {
+      setFrontCapture(payload);
+      if (curType === "single") {
+        setStep("review_front");
+      } else {
+        // Double-sided: transition to flip step
+        setStep("awaiting_back");
+      }
+    } else if (curStep === "scanning_back") {
+      setBackCapture(payload);
+      setStep("review_both");
+    }
+  }, []);
+
+  const handleEngineCaptureRef = useRef<(payload: CapturePayload) => void>(handleEngineCapture);
+  useEffect(() => {
+    handleEngineCaptureRef.current = handleEngineCapture;
+  }, [handleEngineCapture]);
+
+  // 3. Initialize Vision Engine (persists across step transitions without restart)
   useEffect(() => {
     if (!videoRef.current || !stream) return;
 
     const engine = new CardScanningEngine({
-      processingWidth: 480,
-      processingHeight: 320,
-      stabilityDurationMs: 800,
-      displacementThreshold: 12,
+      processingWidth: 360,
+      processingHeight: 240,
+      stabilityDurationMs: 600,
+      displacementThreshold: 26,
       onStateChange: (res) => {
         setDetection(res);
       },
-      onCapture: handleEngineCapture,
+      onCapture: (payload) => {
+        handleEngineCaptureRef.current(payload);
+      },
     });
 
     engineRef.current = engine;
@@ -126,31 +157,95 @@ export default function ScanPage() {
       engine.stop();
       engineRef.current = null;
     };
-  }, [videoRef, stream, handleEngineCapture]);
+  }, [videoRef, stream]);
 
-  // 4. Render Bounding Box on Overlay Canvas
+  // 4. Render Guide Frame and Bounding Box on Overlay Canvas
   useEffect(() => {
     const canvas = overlayCanvasRef.current;
-    if (!canvas || !videoRef.current) return;
+    if (!canvas) return;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (detection.corners && (step === "scanning_front" || step === "scanning_back")) {
+    if (step !== "scanning_front" && step !== "scanning_back") return;
+
+    const w = canvas.width;
+    const h = canvas.height;
+
+    // A. Always draw the Card Alignment Guide Box in center
+    const guideW = Math.round(w * 0.78);
+    const guideH = Math.round(guideW / 1.586);
+    const guideX = Math.round((w - guideW) / 2);
+    const guideY = Math.round((h - guideH) / 2);
+    const radius = 12;
+
+    // Guide background vignette effect
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.roundRect(guideX, guideY, guideW, guideH, radius);
+    ctx.fillStyle = "rgba(10, 15, 30, 0.35)";
+    ctx.fill("evenodd");
+    ctx.restore();
+
+    // Guide box outline
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(guideX, guideY, guideW, guideH, radius);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = detection.detected ? "rgba(99, 102, 241, 0.4)" : "rgba(148, 163, 184, 0.35)";
+    ctx.stroke();
+
+    // Corner target brackets
+    const bracketLen = 22;
+    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = detection.detected ? "#6366f1" : "rgba(255, 255, 255, 0.7)";
+
+    // Top-Left
+    ctx.beginPath();
+    ctx.moveTo(guideX, guideY + bracketLen);
+    ctx.lineTo(guideX, guideY);
+    ctx.lineTo(guideX + bracketLen, guideY);
+    ctx.stroke();
+
+    // Top-Right
+    ctx.beginPath();
+    ctx.moveTo(guideX + guideW - bracketLen, guideY);
+    ctx.lineTo(guideX + guideW, guideY);
+    ctx.lineTo(guideX + guideW, guideY + bracketLen);
+    ctx.stroke();
+
+    // Bottom-Right
+    ctx.beginPath();
+    ctx.moveTo(guideX + guideW, guideY + guideH - bracketLen);
+    ctx.lineTo(guideX + guideW, guideY + guideH);
+    ctx.lineTo(guideX + guideW - bracketLen, guideY + guideH);
+    ctx.stroke();
+
+    // Bottom-Left
+    ctx.beginPath();
+    ctx.moveTo(guideX + bracketLen, guideY + guideH);
+    ctx.lineTo(guideX, guideY + guideH);
+    ctx.lineTo(guideX, guideY + guideH - bracketLen);
+    ctx.stroke();
+    ctx.restore();
+
+    // B. Draw Detected Card Quadrilateral Overlay
+    if (detection.corners) {
       const { topLeft, topRight, bottomRight, bottomLeft } = detection.corners;
 
-      // Scale from detector coordinates (480x320) to overlay canvas coordinates
-      const scaleX = canvas.width / 480;
-      const scaleY = canvas.height / 320;
+      // Scale from detector coordinates (360x240) to overlay canvas coordinates
+      const scaleX = w / 360;
+      const scaleY = h / 240;
 
       const p1 = { x: topLeft.x * scaleX, y: topLeft.y * scaleY };
       const p2 = { x: topRight.x * scaleX, y: topRight.y * scaleY };
       const p3 = { x: bottomRight.x * scaleX, y: bottomRight.y * scaleY };
       const p4 = { x: bottomLeft.x * scaleX, y: bottomLeft.y * scaleY };
 
-      // Draw quadrilateral boundary
+      ctx.save();
       ctx.beginPath();
       ctx.moveTo(p1.x, p1.y);
       ctx.lineTo(p2.x, p2.y);
@@ -158,33 +253,33 @@ export default function ScanPage() {
       ctx.lineTo(p4.x, p4.y);
       ctx.closePath();
 
-      // Color changes based on stability
       if (detection.state === "capturing") {
-        ctx.strokeStyle = "#10b981"; // Emerald
-        ctx.fillStyle = "rgba(16, 185, 129, 0.25)";
+        ctx.strokeStyle = "#10b981"; // Emerald green
+        ctx.fillStyle = "rgba(16, 185, 129, 0.35)";
         ctx.lineWidth = 4;
       } else if (detection.state === "stabilizing") {
         ctx.strokeStyle = "#6366f1"; // Indigo
-        ctx.fillStyle = "rgba(99, 102, 241, 0.15)";
+        ctx.fillStyle = "rgba(99, 102, 241, 0.20)";
         ctx.lineWidth = 3;
       } else {
         ctx.strokeStyle = "#38bdf8"; // Sky blue
-        ctx.fillStyle = "rgba(56, 189, 248, 0.08)";
-        ctx.lineWidth = 2;
+        ctx.fillStyle = "rgba(56, 189, 248, 0.10)";
+        ctx.lineWidth = 2.5;
       }
 
       ctx.fill();
       ctx.stroke();
 
-      // Corner targets
+      // Corner target dots
       [p1, p2, p3, p4].forEach((p) => {
         ctx.beginPath();
         ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
         ctx.fillStyle = ctx.strokeStyle;
         ctx.fill();
       });
+      ctx.restore();
     }
-  }, [detection, step, videoRef]);
+  }, [detection, step]);
 
   // Switch card type
   const handleCardTypeChange = async (newType: "single" | "double") => {
@@ -374,8 +469,7 @@ export default function ScanPage() {
                 <select
                   value={selectedDeviceId}
                   onChange={(e) => {
-                    setSelectedDeviceId(e.target.value);
-                    startCamera(e.target.value);
+                    selectDevice(e.target.value);
                   }}
                   className="bg-slate-900 text-xs text-slate-300 border border-slate-800 rounded-lg px-2 py-1 outline-none focus:border-indigo-500"
                 >
@@ -389,7 +483,10 @@ export default function ScanPage() {
             </div>
 
             {/* Video Viewport with Boundary Overlay */}
-            <div className="relative w-full max-w-2xl aspect-[4/3] sm:aspect-[16/10] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl flex items-center justify-center">
+            <div
+              onClick={resumeVideo}
+              className="relative w-full max-w-2xl aspect-[4/3] sm:aspect-[16/10] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl flex items-center justify-center cursor-pointer"
+            >
               <video
                 ref={videoRef}
                 autoPlay
@@ -406,9 +503,36 @@ export default function ScanPage() {
                 className="absolute inset-0 w-full h-full pointer-events-none"
               />
 
+              {/* iOS Touch-to-Play Overlay (Appears if Safari holds video paused) */}
+              {stream && !isPlaying && !isCameraLoading && (
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    resumeVideo();
+                  }}
+                  className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-10"
+                >
+                  <div className="w-14 h-14 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-600/40 mb-3 animate-pulse">
+                    <Play className="w-7 h-7 ml-0.5 fill-white" />
+                  </div>
+                  <h3 className="text-base font-bold text-white mb-1">Tap to Start Camera Preview</h3>
+                  <p className="text-xs text-slate-300 max-w-xs">
+                    iOS Safari requires user touch to activate inline camera video playback.
+                  </p>
+                </div>
+              )}
+
+              {/* Connecting Loading Indicator */}
+              {isCameraLoading && (
+                <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-10 pointer-events-none">
+                  <RefreshCw className="w-8 h-8 text-indigo-400 animate-spin mb-3" />
+                  <p className="text-sm font-semibold text-white">Connecting camera...</p>
+                </div>
+              )}
+
               {/* Status HUD Over Video */}
-              <div className="absolute top-4 inset-x-4 flex justify-between items-center pointer-events-none">
-                <div className="bg-slate-950/80 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-slate-800 text-xs font-medium text-slate-200 flex items-center gap-2 shadow-lg">
+              <div className="absolute top-4 inset-x-4 flex justify-between items-center pointer-events-none z-10">
+                <div className="bg-slate-950/85 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-slate-800 text-xs font-medium text-slate-200 flex items-center gap-2 shadow-lg">
                   <div
                     className={`w-2.5 h-2.5 rounded-full ${
                       detection.state === "capturing"
@@ -424,7 +548,7 @@ export default function ScanPage() {
                 </div>
 
                 {detection.state === "stabilizing" && (
-                  <div className="bg-slate-950/80 backdrop-blur-md px-3 py-1 rounded-full border border-indigo-500/40 text-xs font-semibold text-indigo-300 flex items-center gap-1.5 shadow-lg">
+                  <div className="bg-slate-950/85 backdrop-blur-md px-3 py-1 rounded-full border border-indigo-500/40 text-xs font-semibold text-indigo-300 flex items-center gap-1.5 shadow-lg">
                     <span>Hold still</span>
                     <span className="font-mono">{Math.round(detection.stabilityProgress * 100)}%</span>
                   </div>
@@ -433,7 +557,7 @@ export default function ScanPage() {
 
               {/* Stability Progress Bar across bottom */}
               {detection.state === "stabilizing" && (
-                <div className="absolute bottom-0 inset-x-0 h-1.5 bg-slate-800">
+                <div className="absolute bottom-0 inset-x-0 h-1.5 bg-slate-800 z-10">
                   <div
                     className="h-full bg-gradient-to-r from-indigo-500 to-emerald-400 transition-all duration-100"
                     style={{ width: `${detection.stabilityProgress * 100}%` }}
