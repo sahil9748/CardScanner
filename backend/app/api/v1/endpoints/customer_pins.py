@@ -32,12 +32,15 @@ def validate_pin(
         client_ip=client_ip,
     )
 
-    # Set secure session cookie
+    # Set secure session cookie (scheme-aware so cookies are never dropped on HTTP/IP access)
+    is_secure = settings.COOKIE_SECURE and (
+        request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    )
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
         value=session.session_token,
         httponly=True,
-        secure=settings.COOKIE_SECURE,
+        secure=is_secure,
         samesite=settings.COOKIE_SAMESITE,
         max_age=settings.SESSION_EXPIRY_MINUTES * 60,
         path="/",

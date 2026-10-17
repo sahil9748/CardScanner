@@ -134,11 +134,8 @@ setup_environment() {
         PIN_HMAC_SECRET=$(openssl rand -hex 32)
         POSTGRES_PASSWORD=$(openssl rand -hex 16)
 
-        # Check if domain is using SSL
+        # Default COOKIE_SECURE to false so session cookies are never rejected on HTTP/IP access
         COOKIE_SECURE="false"
-        if [[ "$DOMAIN" != "localhost" && "$DOMAIN" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-            COOKIE_SECURE="true"
-        fi
 
         cat > .env << EOF
 # ==============================================================================

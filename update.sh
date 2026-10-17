@@ -57,6 +57,11 @@ else
     log_success "Git repository updated to $(git rev-parse --short HEAD)."
 fi
 
+# Ensure COOKIE_SECURE is set to false in .env so session cookies work across HTTP/HTTPS/IP
+if [ -f .env ]; then
+    sed -i 's/COOKIE_SECURE=true/COOKIE_SECURE=false/g' .env 2>/dev/null || true
+fi
+
 # 2. Check Docker Compose
 COMPOSE_CMD=$(get_compose_cmd)
 if [ -z "$COMPOSE_CMD" ]; then

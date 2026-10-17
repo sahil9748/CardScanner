@@ -53,12 +53,15 @@ def admin_login(
     user.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
 
-    # Set admin session cookie
+    # Set admin session cookie (scheme-aware so cookies are never dropped on HTTP/IP access)
+    is_secure = settings.COOKIE_SECURE and (
+        request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    )
     response.set_cookie(
         key=settings.ADMIN_COOKIE_NAME,
         value=user.id,
         httponly=True,
-        secure=settings.COOKIE_SECURE,
+        secure=is_secure,
         samesite=settings.COOKIE_SAMESITE,
         max_age=settings.ADMIN_SESSION_EXPIRY_HOURS * 3600,
         path="/",
