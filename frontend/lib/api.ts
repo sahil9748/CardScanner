@@ -81,6 +81,11 @@ export const api = {
   // Customer Sessions
   getCurrentSession: () => request<any>("/sessions/current"),
 
+  startNextSession: () =>
+    request<any>("/sessions/next", {
+      method: "POST",
+    }),
+
   updateCardType: (card_type: "single" | "double") =>
     request<any>("/sessions/card-type", {
       method: "POST",

@@ -233,15 +233,16 @@ export default function ScanPage() {
 
     try {
       // 1. Upload Front Image (Server will automatically auto-crop and rectify)
-      await api.uploadSessionImage(session.id, "front", frontCapture.originalBlob, frontCapture.processedBlob);
+      const uploadRes = await api.uploadSessionImage(session.id, "front", frontCapture.originalBlob, frontCapture.processedBlob);
+      const activeSessionId = uploadRes?.session_id || session.id;
 
       // 2. Upload Back Image (if double-sided)
       if (cardType === "double" && backCapture) {
-        await api.uploadSessionImage(session.id, "back", backCapture.originalBlob, backCapture.processedBlob);
+        await api.uploadSessionImage(activeSessionId, "back", backCapture.originalBlob, backCapture.processedBlob);
       }
 
       // 3. Complete Session
-      const completed = await api.completeSession(session.id);
+      const completed = await api.completeSession(activeSessionId);
       setCompletedCard(completed);
       setStep("completed");
 
@@ -260,13 +261,25 @@ export default function ScanPage() {
   };
 
   // Restart scan workflow for another card
-  const handleScanAnother = () => {
+  const handleScanAnother = async () => {
     setFrontCapture(null);
     setBackCapture(null);
     setCompletedCard(null);
+    setUploadError(null);
     setStep("scanning_front");
     resumeVideo();
-    api.getCurrentSession().then(setSession).catch(() => router.push("/"));
+
+    try {
+      const nextSession = await api.startNextSession();
+      setSession(nextSession);
+    } catch (_) {
+      try {
+        const curSession = await api.getCurrentSession();
+        setSession(curSession);
+      } catch (err) {
+        router.push("/");
+      }
+    }
   };
 
   if (isLoadingSession) {

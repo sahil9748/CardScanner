@@ -1,16 +1,18 @@
 from typing import Optional
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status, Response
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status, Response, Request
 from fastapi.responses import StreamingResponse
 import io
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.api.deps import get_current_customer_session
+from app.api.deps import get_current_customer_session, get_client_ip
 from app.models.scan_session import ScanSession
 from app.models.gift_card_image import GiftCardImage
 from app.services.session_service import SessionService
 from app.services.card_service import CardService
 from app.storage.factory import get_storage
 from app.schemas.session import SessionResponse, SessionInitRequest, CompleteSessionResponse
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -49,12 +51,91 @@ def _format_session_response(session: ScanSession) -> dict:
     }
 
 
+def _create_and_cookie_next_session(
+    response: Response,
+    request: Request,
+    db: Session,
+    current_session: ScanSession,
+) -> ScanSession:
+    """Helper to start the next card scan session and set the updated cookie."""
+    pin = current_session.access_pin
+    if not pin or pin.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access PIN is no longer active.",
+        )
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if pin.expires_at and pin.expires_at < now:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access PIN has expired.",
+        )
+
+    if pin.max_completed_scans is not None and pin.completed_scans >= pin.max_completed_scans:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="All scans for this PIN have been completed.",
+        )
+
+    client_ip = get_client_ip(request)
+    new_session = SessionService.create_session_for_pin(
+        db=db,
+        pin=pin,
+        card_type=current_session.card_type,
+        client_ip=client_ip,
+    )
+
+    is_secure = settings.COOKIE_SECURE and (
+        request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    )
+    response.set_cookie(
+        key=settings.SESSION_COOKIE_NAME,
+        value=new_session.session_token,
+        httponly=True,
+        secure=is_secure,
+        samesite=settings.COOKIE_SAMESITE,
+        max_age=settings.SESSION_EXPIRY_MINUTES * 60,
+        path="/",
+    )
+    return new_session
+
+
 @router.get("/current", status_code=status.HTTP_200_OK)
 def get_current_session(
+    response: Response,
+    request: Request,
     current_session: ScanSession = Depends(get_current_customer_session),
+    db: Session = Depends(get_db),
 ):
-    """Retrieve the customer's current active scanning session."""
+    """
+    Retrieve the customer's current active scanning session.
+    If the previous card scan was completed and the PIN has scans remaining,
+    automatically creates and returns a new active scanning session for the next card.
+    """
+    if current_session.status == "completed":
+        pin = current_session.access_pin
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if pin and pin.status == "active" and (pin.expires_at is None or pin.expires_at > now):
+            if pin.max_completed_scans is None or pin.completed_scans < pin.max_completed_scans:
+                new_session = _create_and_cookie_next_session(response, request, db, current_session)
+                return _format_session_response(new_session)
+
     return _format_session_response(current_session)
+
+
+@router.post("/next", status_code=status.HTTP_200_OK)
+def start_next_session(
+    response: Response,
+    request: Request,
+    current_session: ScanSession = Depends(get_current_customer_session),
+    db: Session = Depends(get_db),
+):
+    """
+    Start the next scanning session for the authenticated PIN if allowance remains.
+    """
+    new_session = _create_and_cookie_next_session(response, request, db, current_session)
+    return _format_session_response(new_session)
 
 
 @router.post("/card-type", status_code=status.HTTP_200_OK)
@@ -72,27 +153,55 @@ def update_card_type(
 async def upload_session_image(
     session_id: str,
     side: str,
+    response: Response,
+    request: Request,
     original_file: UploadFile = File(...),
     processed_file: UploadFile = File(...),
     current_session: ScanSession = Depends(get_current_customer_session),
     db: Session = Depends(get_db),
 ):
     """
-    Upload original and perspective-corrected processed images for card front or back.
-    Enforces that customer can only upload to their own session.
+    Upload original and processed images for card front or back.
+    If current session is already in 'completed' state and scans remain on the PIN,
+    automatically creates the next session seamlessly.
     """
+    target_session = current_session
+
+    # Security check: must match current session or belong to the same authorized PIN
     if current_session.id != session_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Unauthorized: You can only upload images to your own session.",
-        )
+        queried = db.query(ScanSession).filter(ScanSession.id == session_id).first()
+        if queried and queried.access_pin_id == current_session.access_pin_id:
+            target_session = queried
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Unauthorized: You can only upload images to your own session.",
+            )
+
+    # If target session was already completed, auto-spawn next session if scans remain
+    if target_session.status == "completed":
+        pin = target_session.access_pin
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if pin and pin.status == "active" and (pin.expires_at is None or pin.expires_at > now):
+            if pin.max_completed_scans is None or pin.completed_scans < pin.max_completed_scans:
+                target_session = _create_and_cookie_next_session(response, request, db, target_session)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="All scans for this PIN have been completed.",
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot upload image to session in 'completed' state.",
+            )
 
     original_bytes = await original_file.read()
     processed_bytes = await processed_file.read()
 
     image_record = SessionService.store_session_image(
         db=db,
-        session=current_session,
+        session=target_session,
         side=side,
         original_bytes=original_bytes,
         processed_bytes=processed_bytes,
@@ -100,13 +209,13 @@ async def upload_session_image(
 
     return {
         "success": True,
-        "session_id": current_session.id,
+        "session_id": target_session.id,
         "side": side,
         "image_id": image_record.id,
-        "session_status": current_session.status,
-        "front_status": current_session.front_capture_status,
-        "back_status": current_session.back_capture_status,
-        "processed_url": f"/api/v1/sessions/{current_session.id}/images/{side}/processed",
+        "session_status": target_session.status,
+        "front_status": target_session.front_capture_status,
+        "back_status": target_session.back_capture_status,
+        "processed_url": f"/api/v1/sessions/{target_session.id}/images/{side}/processed",
     }
 
 
@@ -120,10 +229,15 @@ def retake_session_image(
     """
     Allow customer to retake front or back independently without resetting the other side.
     """
+    target_session = current_session
     if current_session.id != session_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
+        queried = db.query(ScanSession).filter(ScanSession.id == session_id).first()
+        if queried and queried.access_pin_id == current_session.access_pin_id:
+            target_session = queried
+        else:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
 
-    updated = SessionService.retake_side(db, current_session, side)
+    updated = SessionService.retake_side(db, target_session, side)
     return _format_session_response(updated)
 
 
@@ -140,14 +254,19 @@ def complete_session(
     - Two-sided: requires front AND back images. Rejects incomplete scans!
     - Increments PIN completed_scans.
     """
+    target_session = current_session
     if current_session.id != session_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
+        queried = db.query(ScanSession).filter(ScanSession.id == session_id).first()
+        if queried and queried.access_pin_id == current_session.access_pin_id:
+            target_session = queried
+        else:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
 
-    card = CardService.complete_scan_session(db, current_session)
+    card = CardService.complete_scan_session(db, target_session)
 
     return {
         "success": True,
-        "session_id": current_session.id,
+        "session_id": target_session.id,
         "gift_card_id": card.id,
         "reference_code": card.reference_code,
         "status": "completed",
@@ -165,37 +284,57 @@ def cancel_session(
     if current_session.id != session_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
 
-    SessionService.mark_session_incomplete(db, current_session)
-    return {"success": True, "status": "incomplete"}
+    updated = SessionService.cancel_session(db, current_session)
+    return _format_session_response(updated)
 
 
-@router.get("/{session_id}/images/{side}/{img_type}")
-def get_session_image_stream(
+@router.get("/{session_id}/images/{side}/original")
+def get_original_image(
     session_id: str,
     side: str,
-    img_type: str,  # "original" or "processed"
     current_session: ScanSession = Depends(get_current_customer_session),
     db: Session = Depends(get_db),
 ):
-    """
-    Private authorized image stream: Customer can only stream images from their own session.
-    Prevents enumeration / IDOR vulnerabilities.
-    """
+    """Securely stream original card image exclusively to the session owner."""
     if current_session.id != session_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
+        queried = db.query(ScanSession).filter(ScanSession.id == session_id).first()
+        if not (queried and queried.access_pin_id == current_session.access_pin_id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
 
-    img_record = (
+    image_record = (
         db.query(GiftCardImage)
         .filter(GiftCardImage.scan_session_id == session_id, GiftCardImage.side == side)
         .first()
     )
-    if not img_record:
-        raise HTTPException(status_code=404, detail="Image not found")
+    if not image_record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
 
-    storage_key = img_record.processed_image_key if img_type == "processed" else img_record.original_image_key
     storage = get_storage()
-    try:
-        data = storage.get_image_bytes(storage_key)
-        return StreamingResponse(io.BytesIO(data), media_type=img_record.mime_type)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Image file unavailable in storage")
+    data, content_type = storage.get_image(image_record.original_image_key)
+    return StreamingResponse(io.BytesIO(data), media_type=content_type)
+
+
+@router.get("/{session_id}/images/{side}/processed")
+def get_processed_image(
+    session_id: str,
+    side: str,
+    current_session: ScanSession = Depends(get_current_customer_session),
+    db: Session = Depends(get_db),
+):
+    """Securely stream perspective-corrected card image."""
+    if current_session.id != session_id:
+        queried = db.query(ScanSession).filter(ScanSession.id == session_id).first()
+        if not (queried and queried.access_pin_id == current_session.access_pin_id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
+
+    image_record = (
+        db.query(GiftCardImage)
+        .filter(GiftCardImage.scan_session_id == session_id, GiftCardImage.side == side)
+        .first()
+    )
+    if not image_record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
+
+    storage = get_storage()
+    data, content_type = storage.get_image(image_record.processed_image_key)
+    return StreamingResponse(io.BytesIO(data), media_type=content_type)
