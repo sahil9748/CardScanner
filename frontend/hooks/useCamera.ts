@@ -70,7 +70,6 @@ export function useCamera() {
 
   // Configure video element for iOS Safari WebKit inline playback
   const configureVideoElement = useCallback((video: HTMLVideoElement, mediaStream: MediaStream) => {
-    // Crucial properties for iOS Safari WebKit
     video.muted = true;
     video.defaultMuted = true;
     video.playsInline = true;
@@ -103,7 +102,6 @@ export function useCamera() {
 
     tryPlay();
 
-    // Event listeners
     const handleLoadedMetadata = () => tryPlay();
     const handleCanPlay = () => tryPlay();
     const handlePlaying = () => {
@@ -140,7 +138,7 @@ export function useCamera() {
     }
   }, []);
 
-  // Start camera stream - rock-solid for iOS WebKit & Android
+  // Start camera stream - clean constraints without restrictive max-dimensions for iOS WebKit
   const startCamera = useCallback(async (preferredDeviceId?: string) => {
     if (!navigator.mediaDevices?.getUserMedia) {
       setError("Camera API is not supported in this browser. HTTPS may be required.");
@@ -168,24 +166,44 @@ export function useCamera() {
 
     const targetDeviceId = preferredDeviceId || selectedDeviceIdRef.current;
 
-    // Use ideal constraints (avoid 'exact' on iOS Safari to prevent OverconstrainedError)
-    const constraints: MediaStreamConstraints = {
-      audio: false,
-      video: targetDeviceId
-        ? {
-            deviceId: { ideal: targetDeviceId },
-            width: { ideal: 1280, max: 1920 },
-            height: { ideal: 720, max: 1080 },
-          }
-        : {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1280, max: 1920 },
-            height: { ideal: 720, max: 1080 },
-          },
-    };
+    let mediaStream: MediaStream | null = null;
+    try {
+      // Primary constraint: ideal environment facing mode (no rigid height max that rejects portrait on iOS)
+      const primaryConstraints: MediaStreamConstraints = {
+        audio: false,
+        video: targetDeviceId
+          ? { deviceId: { ideal: targetDeviceId } }
+          : { facingMode: { ideal: "environment" } },
+      };
+      mediaStream = await navigator.mediaDevices.getUserMedia(primaryConstraints);
+    } catch (primaryErr: any) {
+      console.warn("Primary camera constraints failed, attempting fallback:", primaryErr);
+      try {
+        // Universal fallback constraint for any available video device
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: true,
+        });
+      } catch (fallbackErr: any) {
+        console.error("All camera constraints failed:", fallbackErr);
+
+        if (fallbackErr.name === "NotAllowedError" || fallbackErr.name === "PermissionDeniedError") {
+          setIsPermissionDenied(true);
+          setError("Camera permission was denied. Please allow camera access in your browser settings to scan cards.");
+        } else if (fallbackErr.name === "NotFoundError" || fallbackErr.name === "DevicesNotFoundError") {
+          setError("No camera device found on this system.");
+        } else if (fallbackErr.name === "NotReadableError" || fallbackErr.name === "TrackStartError") {
+          setError("Camera is currently in use by another application. Please close other camera apps and retry.");
+        } else {
+          setError(fallbackErr.message || "Failed to start camera. Please ensure HTTPS is used.");
+        }
+        setIsLoading(false);
+        isStartingRef.current = false;
+        return;
+      }
+    }
 
     try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = mediaStream;
       setStream(mediaStream);
 
@@ -196,31 +214,6 @@ export function useCamera() {
       }
 
       await refreshDevices();
-    } catch (err: any) {
-      console.error("Camera access error:", err);
-
-      // Benign AbortError on mobile during render cycle - ignore if stream exists
-      if (err.name === "AbortError" && streamRef.current) {
-        return;
-      }
-
-      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-        setIsPermissionDenied(true);
-        setError("Camera permission was denied. Please allow camera access in your browser settings to scan cards.");
-      } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
-        setError("No camera device found on this system.");
-      } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
-        setError("Camera is currently in use by another application. Please close other camera apps and retry.");
-      } else if (err.name === "AbortError") {
-        console.warn("Retrying camera once after WebKit abort...");
-        setTimeout(() => {
-          isStartingRef.current = false;
-          startCamera(preferredDeviceId);
-        }, 300);
-        return;
-      } else {
-        setError(err.message || "Failed to start camera. Please ensure HTTPS is used.");
-      }
     } finally {
       setIsLoading(false);
       isStartingRef.current = false;

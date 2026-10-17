@@ -8,7 +8,6 @@ interface EngineConfig {
   processingHeight?: number;
   stabilityDurationMs?: number;
   displacementThreshold?: number;
-  minAreaRatio?: number;
   onStateChange?: (result: DetectionResult) => void;
   onCapture?: (payload: CapturePayload) => void;
 }
@@ -25,16 +24,15 @@ export class CardScanningEngine {
   private animationFrameId: number | null = null;
   private isRunning = false;
 
-  // Frame rate throttling for mobile CPU efficiency (prevents UI sluggishness)
+  // Frame rate throttling for mobile CPU efficiency (prevents UI lag)
   private lastFrameTimestamp = 0;
-  private readonly minFrameIntervalMs = 80; // ~12 fps processing cap
+  private readonly minFrameIntervalMs = 75; // ~13 fps processing cap
 
   // Config
   private procWidth: number;
   private procHeight: number;
   private stabilityDurationMs: number;
   private displacementThreshold: number;
-  private minAreaRatio: number;
 
   // State
   private lastCorners: QuadCorners | null = null;
@@ -50,9 +48,8 @@ export class CardScanningEngine {
   constructor(config: EngineConfig = {}) {
     this.procWidth = config.processingWidth || 360;
     this.procHeight = config.processingHeight || 240;
-    this.stabilityDurationMs = config.stabilityDurationMs || 600;
-    this.displacementThreshold = config.displacementThreshold || 26;
-    this.minAreaRatio = config.minAreaRatio || 0.10;
+    this.stabilityDurationMs = config.stabilityDurationMs || 500;
+    this.displacementThreshold = config.displacementThreshold || 30;
 
     this.onStateChange = config.onStateChange;
     this.onCapture = config.onCapture;
@@ -143,12 +140,10 @@ export class CardScanningEngine {
       return;
     }
 
-    // 2. Detect card quadrilateral
+    // 2. Detect card quadrilateral matching alignment guide
     let detectedCorners: QuadCorners | null = null;
     if (this.isCvLoaded && this.cv?.Mat) {
       detectedCorners = this.detectQuadWithOpenCV();
-    } else {
-      detectedCorners = this.detectQuadWithCanvas();
     }
 
     const now = performance.now();
@@ -165,21 +160,20 @@ export class CardScanningEngine {
 
       // Aspect ratio score (centered at standard gift card ratio 1.586)
       const ratioDiff = Math.abs(aspectRatio - 1.586);
-      const ratioScore = Math.max(0, 1 - ratioDiff / 0.8);
+      const ratioScore = Math.max(0, 1 - ratioDiff / 0.5);
 
       const area = calculatePolygonArea(detectedCorners);
-      const totalArea = this.procWidth * this.procHeight;
-      const areaRatio = area / totalArea;
-      const areaScore = Math.min(1, areaRatio / 0.35);
+      const guideArea = (this.procWidth * 0.74) * (this.procWidth * 0.74 / 1.586);
+      const areaRatio = Math.min(1, area / guideArea);
 
-      confidence = Math.round((ratioScore * 0.4 + areaScore * 0.6) * 100) / 100;
+      confidence = Math.round((ratioScore * 0.5 + areaRatio * 0.5) * 100) / 100;
 
       // Temporal stability tracking
       if (this.lastCorners) {
         const displacement = calculateCornerDisplacement(this.lastCorners, detectedCorners);
 
         if (displacement < this.displacementThreshold) {
-          // Card is stable within user hand-held tolerance
+          // Card is held steady inside the guide frame
           if (this.stabilityStartTime === null) {
             this.stabilityStartTime = now;
           }
@@ -195,11 +189,11 @@ export class CardScanningEngine {
             stateMessage = "Card detected — hold still...";
           }
         } else {
-          // Card shifted position
+          // Card moved or readjusting
           this.stabilityStartTime = now;
           stabilityProgress = 0;
           state = "detected";
-          stateMessage = "Card detected — stabilizing...";
+          stateMessage = "Card detected — hold steady...";
         }
       } else {
         this.stabilityStartTime = now;
@@ -211,15 +205,15 @@ export class CardScanningEngine {
     } else {
       // No card found in this frame
       this.framesSinceCardLost++;
-      if (this.framesSinceCardLost > 8) {
+      if (this.framesSinceCardLost > 6) {
         this.stabilityStartTime = null;
         this.lastCorners = null;
         state = "searching";
-        stateMessage = "Align gift card within frame";
+        stateMessage = "Position card inside frame";
       } else if (this.lastCorners) {
         // Keep previous state for brief frame drops/reflections
         state = "detected";
-        stateMessage = "Keep card steady";
+        stateMessage = "Hold card steady";
       }
     }
 
@@ -251,7 +245,11 @@ export class CardScanningEngine {
 
   /**
    * OpenCV.js real-time quadrilateral detection
-   * Employs polygon approximation and minAreaRect bounding strategies
+   * Strictly verifies candidate contours against the alignment guide ROI:
+   * 1. Centered in viewport
+   * 2. Card-like area (38% to 135% of guide box)
+   * 3. Standard card aspect ratio (1.32 to 1.85)
+   * 4. Solid filled rectangle
    */
   private detectQuadWithOpenCV(): QuadCorners | null {
     const cv = this.cv;
@@ -279,7 +277,7 @@ export class CardScanningEngine {
 
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
       cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
-      cv.Canny(blur, edges, 40, 140);
+      cv.Canny(blur, edges, 45, 140);
 
       // Morphological closing to bridge small gaps in card perimeter
       kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
@@ -287,36 +285,54 @@ export class CardScanningEngine {
 
       cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-      const minArea = this.procWidth * this.procHeight * this.minAreaRatio;
+      // Guide Frame ROI criteria
+      const guideW = Math.round(this.procWidth * 0.74);
+      const guideH = Math.round(guideW / 1.586);
+      const guideArea = guideW * guideH;
+      const expectedCenterX = this.procWidth / 2;
+      const expectedCenterY = this.procHeight / 2;
+
+      const minCardArea = guideArea * 0.38;
+      const maxCardArea = guideArea * 1.35;
+
       let bestCorners: QuadCorners | null = null;
       let maxScore = -1;
 
       for (let i = 0; i < contours.size(); i++) {
         const cnt = contours.get(i);
         const area = cv.contourArea(cnt);
-        if (area < minArea) {
+
+        // 1. Area check: Must be appropriately sized relative to the guide box
+        if (area < minCardArea || area > maxCardArea) {
           cnt.delete();
           continue;
         }
 
         const peri = cv.arcLength(cnt, true);
         let candidateCorners: QuadCorners | null = null;
+        let contourCenterX = 0;
+        let contourCenterY = 0;
 
         // Strategy A: Polygon approximation for sharp 4-corner cards
         cv.approxPolyDP(cnt, approx, 0.035 * peri, true);
         if (approx.rows === 4 && cv.isContourConvex(approx)) {
           const pts: Point[] = [];
+          let sumX = 0;
+          let sumY = 0;
           for (let j = 0; j < 4; j++) {
-            pts.push({
-              x: approx.data32S[j * 2],
-              y: approx.data32S[j * 2 + 1],
-            });
+            const px = approx.data32S[j * 2];
+            const py = approx.data32S[j * 2 + 1];
+            pts.push({ x: px, y: py });
+            sumX += px;
+            sumY += py;
           }
           candidateCorners = orderCorners(pts);
+          contourCenterX = sumX / 4;
+          contourCenterY = sumY / 4;
         }
 
         // Strategy B: If rounded corners or fingers caused polygon vertices to be 5-10,
-        // use minAreaRect to extract the true card rectangular boundary
+        // use minAreaRect to extract the card boundary
         if (!candidateCorners && approx.rows >= 4 && approx.rows <= 10) {
           try {
             const rotRect = cv.minAreaRect(cnt);
@@ -326,27 +342,30 @@ export class CardScanningEngine {
 
             // Check solidity: card contour should fill at least 62% of bounding box
             if (rectArea > 0 && area / rectArea >= 0.62) {
-              const longer = Math.max(rectW, rectH);
-              const shorter = Math.min(rectW, rectH);
-              const aspect = shorter > 0 ? longer / shorter : 1;
-
-              // Physical gift card standard aspect ratio is ~1.586 (accept 1.25 to 2.05)
-              if (aspect >= 1.25 && aspect <= 2.05) {
-                const pts = this.getRotatedRectCorners(rotRect);
-                candidateCorners = orderCorners(pts);
-              }
+              const pts = this.getRotatedRectCorners(rotRect);
+              candidateCorners = orderCorners(pts);
+              contourCenterX = rotRect.center.x;
+              contourCenterY = rotRect.center.y;
             }
           } catch (_) {}
         }
 
         if (candidateCorners) {
-          const { aspectRatio } = calculateCardDimensions(candidateCorners);
-          if (aspectRatio >= 1.2 && aspectRatio <= 2.1) {
-            const aspectDiff = Math.abs(aspectRatio - 1.586);
-            const score = area * (1 - aspectDiff * 0.4);
-            if (score > maxScore) {
-              maxScore = score;
-              bestCorners = candidateCorners;
+          // 2. Center check: Must be centered within guide frame
+          const distX = Math.abs(contourCenterX - expectedCenterX);
+          const distY = Math.abs(contourCenterY - expectedCenterY);
+          const isCentered = distX < this.procWidth * 0.22 && distY < this.procHeight * 0.22;
+
+          if (isCentered) {
+            const { aspectRatio } = calculateCardDimensions(candidateCorners);
+            // 3. Aspect ratio check: Standard gift card is 1.586 (accept 1.32 to 1.85)
+            if (aspectRatio >= 1.32 && aspectRatio <= 1.85) {
+              const aspectDiff = Math.abs(aspectRatio - 1.586);
+              const score = area * (1 - aspectDiff * 0.5) - (distX + distY) * 10;
+              if (score > maxScore) {
+                maxScore = score;
+                bestCorners = candidateCorners;
+              }
             }
           }
         }
@@ -399,13 +418,13 @@ export class CardScanningEngine {
   }
 
   /**
-   * Fallback center card guide rectangle
+   * Center card guide rectangle for manual capture alignment
    */
-  public detectQuadWithCanvas(): QuadCorners {
+  public getGuideBoxCorners(): QuadCorners {
     const w = this.procWidth;
     const h = this.procHeight;
 
-    const boxW = Math.round(w * 0.76);
+    const boxW = Math.round(w * 0.74);
     const boxH = Math.round(boxW / 1.586);
     const startX = Math.round((w - boxW) / 2);
     const startY = Math.round((h - boxH) / 2);
@@ -419,14 +438,20 @@ export class CardScanningEngine {
   }
 
   /**
-   * Execute manual capture fallback (e.g. user clicks "Capture Now")
+   * Execute manual capture (e.g. user clicks "Capture Now")
    */
   public async triggerManualCapture() {
-    if (!this.videoEl) return;
+    if (!this.videoEl) {
+      console.warn("Manual capture triggered without video element");
+      return;
+    }
+
+    // Unlock capture lock to guarantee manual capture execution
+    this.captureLocked = false;
 
     let corners = this.lastCorners;
     if (!corners) {
-      corners = this.detectQuadWithCanvas();
+      corners = this.getGuideBoxCorners();
     }
 
     this.captureLocked = true;
@@ -440,15 +465,16 @@ export class CardScanningEngine {
     if (!this.videoEl) return;
 
     try {
-      const fullW = this.videoEl.videoWidth || 1280;
-      const fullH = this.videoEl.videoHeight || 720;
-      if (fullW === 0 || fullH === 0) {
-        console.warn("Camera video not ready for frame capture");
-        this.captureLocked = false;
-        return;
+      if (this.videoEl.videoWidth === 0 || this.videoEl.videoHeight === 0) {
+        try {
+          await this.videoEl.play();
+        } catch (_) {}
       }
 
-      // Scale corners from processing resolution to full resolution
+      const fullW = this.videoEl.videoWidth || 1280;
+      const fullH = this.videoEl.videoHeight || 720;
+
+      // Scale corners from processing resolution to full camera resolution
       const scaleX = fullW / this.procWidth;
       const scaleY = fullH / this.procHeight;
 
@@ -462,7 +488,11 @@ export class CardScanningEngine {
       // 1. Capture original full-resolution frame
       this.fullCanvas.width = fullW;
       this.fullCanvas.height = fullH;
-      this.fullCtx.drawImage(this.videoEl, 0, 0, fullW, fullH);
+      try {
+        this.fullCtx.drawImage(this.videoEl, 0, 0, fullW, fullH);
+      } catch (drawErr) {
+        console.warn("Frame draw notice:", drawErr);
+      }
 
       const originalBlob = await new Promise<Blob>((res) =>
         this.fullCanvas.toBlob((b) => res(b!), "image/jpeg", 0.92)
@@ -471,8 +501,8 @@ export class CardScanningEngine {
 
       // 2. Perform perspective correction
       const { width: targetW, height: targetH } = calculateCardDimensions(fullCorners);
-      const outW = Math.max(480, Math.min(targetW, 1400));
-      const outH = Math.max(300, Math.min(targetH, 880));
+      const outW = Math.max(500, Math.min(targetW, 1400));
+      const outH = Math.max(315, Math.min(targetH, 882));
 
       const warpedCanvas = document.createElement("canvas");
       warpedCanvas.width = outW;

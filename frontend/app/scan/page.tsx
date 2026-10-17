@@ -56,6 +56,10 @@ export default function ScanPage() {
   const [frontCapture, setFrontCapture] = useState<CapturePayload | null>(null);
   const [backCapture, setBackCapture] = useState<CapturePayload | null>(null);
 
+  // Manual capture and shutter state
+  const [isManualCapturing, setIsManualCapturing] = useState<boolean>(false);
+  const [isShutterActive, setIsShutterActive] = useState<boolean>(false);
+
   // Vision detection state
   const [detection, setDetection] = useState<DetectionResult>({
     detected: false,
@@ -109,8 +113,17 @@ export default function ScanPage() {
     }
   }, [isLoadingSession, startCamera]);
 
+  // Shutter flash effect
+  const triggerShutterFlash = useCallback(() => {
+    setIsShutterActive(true);
+    setTimeout(() => setIsShutterActive(false), 250);
+  }, []);
+
   // Handle capture callback from engine
   const handleEngineCapture = useCallback((payload: CapturePayload) => {
+    triggerShutterFlash();
+    setIsManualCapturing(false);
+
     const curStep = stepRef.current;
     const curType = cardTypeRef.current;
 
@@ -126,22 +139,22 @@ export default function ScanPage() {
       setBackCapture(payload);
       setStep("review_both");
     }
-  }, []);
+  }, [triggerShutterFlash]);
 
   const handleEngineCaptureRef = useRef<(payload: CapturePayload) => void>(handleEngineCapture);
   useEffect(() => {
     handleEngineCaptureRef.current = handleEngineCapture;
   }, [handleEngineCapture]);
 
-  // 3. Initialize Vision Engine (persists across step transitions without restart)
+  // 3. Initialize Vision Engine (persists continuously without teardown)
   useEffect(() => {
     if (!videoRef.current || !stream) return;
 
     const engine = new CardScanningEngine({
       processingWidth: 360,
       processingHeight: 240,
-      stabilityDurationMs: 600,
-      displacementThreshold: 26,
+      stabilityDurationMs: 500,
+      displacementThreshold: 30,
       onStateChange: (res) => {
         setDetection(res);
       },
@@ -169,17 +182,18 @@ export default function ScanPage() {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (step !== "scanning_front" && step !== "scanning_back") return;
+    const isScanningStep = step === "scanning_front" || step === "scanning_back";
+    if (!isScanningStep) return;
 
     const w = canvas.width;
     const h = canvas.height;
 
-    // A. Always draw the Card Alignment Guide Box in center
-    const guideW = Math.round(w * 0.78);
+    // A. Card Alignment Guide Box in center
+    const guideW = Math.round(w * 0.74);
     const guideH = Math.round(guideW / 1.586);
     const guideX = Math.round((w - guideW) / 2);
     const guideY = Math.round((h - guideH) / 2);
-    const radius = 12;
+    const radius = 14;
 
     // Guide background vignette effect
     ctx.save();
@@ -199,9 +213,9 @@ export default function ScanPage() {
     ctx.stroke();
 
     // Corner target brackets
-    const bracketLen = 22;
+    const bracketLen = 24;
     ctx.lineWidth = 3.5;
-    ctx.strokeStyle = detection.detected ? "#6366f1" : "rgba(255, 255, 255, 0.7)";
+    ctx.strokeStyle = detection.detected ? "#6366f1" : "rgba(255, 255, 255, 0.75)";
 
     // Top-Left
     ctx.beginPath();
@@ -291,12 +305,13 @@ export default function ScanPage() {
       setStep("scanning_front");
       setFrontCapture(null);
       setBackCapture(null);
+      resumeVideo();
     } catch (e) {
       console.error(e);
     }
   };
 
-  // Retake side
+  // Retake side - guarantees camera wakes and unlocks
   const handleRetake = (side: "front" | "back") => {
     if (side === "front") {
       setFrontCapture(null);
@@ -305,19 +320,37 @@ export default function ScanPage() {
       setBackCapture(null);
       setStep("scanning_back");
     }
-    engineRef.current?.resetCaptureLock();
+    if (engineRef.current) {
+      engineRef.current.resetCaptureLock();
+    }
+    resumeVideo();
   };
 
   // Start back scanning after card flip
   const handleStartBackScan = () => {
     setStep("scanning_back");
-    engineRef.current?.resetCaptureLock();
+    if (engineRef.current) {
+      engineRef.current.resetCaptureLock();
+    }
+    resumeVideo();
   };
 
-  // Manual capture trigger
-  const handleManualCapture = () => {
-    if (engineRef.current) {
-      engineRef.current.triggerManualCapture();
+  // Manual capture trigger with instant tactile feedback
+  const handleManualCapture = async () => {
+    if (isManualCapturing) return;
+    setIsManualCapturing(true);
+
+    try {
+      if (engineRef.current) {
+        engineRef.current.resetCaptureLock();
+        await engineRef.current.triggerManualCapture();
+      }
+    } catch (err) {
+      console.error("Manual capture execution error:", err);
+    } finally {
+      setTimeout(() => {
+        setIsManualCapturing(false);
+      }, 1000);
     }
   };
 
@@ -363,8 +396,10 @@ export default function ScanPage() {
     setBackCapture(null);
     setCompletedCard(null);
     setStep("scanning_front");
-    engineRef.current?.resetCaptureLock();
-    // Refresh session data
+    if (engineRef.current) {
+      engineRef.current.resetCaptureLock();
+    }
+    resumeVideo();
     api.getCurrentSession().then(setSession).catch(() => router.push("/"));
   };
 
@@ -378,6 +413,8 @@ export default function ScanPage() {
       </div>
     );
   }
+
+  const isScanning = (step === "scanning_front" || step === "scanning_back") && !cameraError;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between">
@@ -452,142 +489,170 @@ export default function ScanPage() {
           </div>
         )}
 
-        {/* STEP 1 & 3: LIVE CAMERA PREVIEW */}
-        {(step === "scanning_front" || step === "scanning_back") && !cameraError && (
-          <div className="flex flex-col items-center">
-            {/* Guide Badge */}
-            <div className="mb-3 flex items-center gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wider px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-slate-300 flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
-                Scanning:{" "}
-                <strong className="text-indigo-400">
-                  {step === "scanning_front" ? "Front Side" : "Back Side"}
-                </strong>
-              </span>
+        {/* STEP 1 & 3: LIVE CAMERA VIEWPORT (KEPT PERMANENTLY MOUNTED TO PRESERVE STREAM & OPENCV CONTEXT) */}
+        <div className={`flex flex-col items-center w-full ${isScanning ? "block" : "hidden"}`}>
+          {/* Guide Badge */}
+          <div className="mb-3 flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wider px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-slate-300 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+              Scanning:{" "}
+              <strong className="text-indigo-400">
+                {step === "scanning_front" ? "Front Side" : "Back Side"}
+              </strong>
+            </span>
 
-              {devices.length > 1 && (
-                <select
-                  value={selectedDeviceId}
-                  onChange={(e) => {
-                    selectDevice(e.target.value);
-                  }}
-                  className="bg-slate-900 text-xs text-slate-300 border border-slate-800 rounded-lg px-2 py-1 outline-none focus:border-indigo-500"
-                >
-                  {devices.map((d) => (
-                    <option key={d.deviceId} value={d.deviceId}>
-                      {d.label}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
+            {devices.length > 1 && (
+              <select
+                value={selectedDeviceId}
+                onChange={(e) => {
+                  selectDevice(e.target.value);
+                }}
+                className="bg-slate-900 text-xs text-slate-300 border border-slate-800 rounded-lg px-2 py-1 outline-none focus:border-indigo-500"
+              >
+                {devices.map((d) => (
+                  <option key={d.deviceId} value={d.deviceId}>
+                    {d.label}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
 
-            {/* Video Viewport with Boundary Overlay */}
-            <div
-              onClick={resumeVideo}
-              className="relative w-full max-w-2xl aspect-[4/3] sm:aspect-[16/10] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl flex items-center justify-center cursor-pointer"
-            >
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full object-cover"
-              />
+          {/* Video Viewport with Boundary Overlay */}
+          <div
+            onClick={resumeVideo}
+            className="relative w-full max-w-2xl aspect-[4/3] sm:aspect-[16/10] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl flex items-center justify-center cursor-pointer"
+          >
+            <video
+              ref={(el) => {
+                videoRef.current = el;
+                if (el && stream) {
+                  el.muted = true;
+                  el.defaultMuted = true;
+                  el.playsInline = true;
+                  el.setAttribute("playsinline", "true");
+                  el.setAttribute("webkit-playsinline", "true");
+                  el.setAttribute("muted", "true");
+                  el.setAttribute("autoplay", "true");
+                  if (el.srcObject !== stream) {
+                    el.srcObject = stream;
+                  }
+                  el.play().catch(() => {});
+                }
+              }}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover"
+            />
 
-              {/* Real-time Canvas Overlay */}
-              <canvas
-                ref={overlayCanvasRef}
-                width={640}
-                height={480}
-                className="absolute inset-0 w-full h-full pointer-events-none"
-              />
+            {/* Real-time Canvas Overlay */}
+            <canvas
+              ref={overlayCanvasRef}
+              width={640}
+              height={480}
+              className="absolute inset-0 w-full h-full pointer-events-none"
+            />
 
-              {/* iOS Touch-to-Play Overlay (Appears if Safari holds video paused) */}
-              {stream && !isPlaying && !isCameraLoading && (
+            {/* Camera Shutter White Flash Effect */}
+            {isShutterActive && (
+              <div className="absolute inset-0 bg-white pointer-events-none transition-opacity duration-200 z-30 opacity-75" />
+            )}
+
+            {/* iOS Touch-to-Play Overlay (Appears if Safari holds video paused) */}
+            {stream && !isPlaying && !isCameraLoading && (
+              <div
+                onClick={(e) => {
+                  e.stopPropagation();
+                  resumeVideo();
+                }}
+                className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-10"
+              >
+                <div className="w-14 h-14 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-600/40 mb-3 animate-pulse">
+                  <Play className="w-7 h-7 ml-0.5 fill-white" />
+                </div>
+                <h3 className="text-base font-bold text-white mb-1">Tap to Start Camera Preview</h3>
+                <p className="text-xs text-slate-300 max-w-xs">
+                  iOS Safari requires user touch to activate inline camera video playback.
+                </p>
+              </div>
+            )}
+
+            {/* Connecting Loading Indicator */}
+            {isCameraLoading && (
+              <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-10 pointer-events-none">
+                <RefreshCw className="w-8 h-8 text-indigo-400 animate-spin mb-3" />
+                <p className="text-sm font-semibold text-white">Connecting camera...</p>
+              </div>
+            )}
+
+            {/* Status HUD Over Video */}
+            <div className="absolute top-4 inset-x-4 flex justify-between items-center pointer-events-none z-10">
+              <div className="bg-slate-950/85 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-slate-800 text-xs font-medium text-slate-200 flex items-center gap-2 shadow-lg">
                 <div
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    resumeVideo();
-                  }}
-                  className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-10"
-                >
-                  <div className="w-14 h-14 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-600/40 mb-3 animate-pulse">
-                    <Play className="w-7 h-7 ml-0.5 fill-white" />
-                  </div>
-                  <h3 className="text-base font-bold text-white mb-1">Tap to Start Camera Preview</h3>
-                  <p className="text-xs text-slate-300 max-w-xs">
-                    iOS Safari requires user touch to activate inline camera video playback.
-                  </p>
-                </div>
-              )}
-
-              {/* Connecting Loading Indicator */}
-              {isCameraLoading && (
-                <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-10 pointer-events-none">
-                  <RefreshCw className="w-8 h-8 text-indigo-400 animate-spin mb-3" />
-                  <p className="text-sm font-semibold text-white">Connecting camera...</p>
-                </div>
-              )}
-
-              {/* Status HUD Over Video */}
-              <div className="absolute top-4 inset-x-4 flex justify-between items-center pointer-events-none z-10">
-                <div className="bg-slate-950/85 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-slate-800 text-xs font-medium text-slate-200 flex items-center gap-2 shadow-lg">
-                  <div
-                    className={`w-2.5 h-2.5 rounded-full ${
-                      detection.state === "capturing"
-                        ? "bg-emerald-500 animate-ping"
-                        : detection.state === "stabilizing"
-                        ? "bg-indigo-500"
-                        : detection.state === "detected"
-                        ? "bg-sky-400"
-                        : "bg-amber-400"
-                    }`}
-                  />
-                  <span>{detection.stateMessage}</span>
-                </div>
-
-                {detection.state === "stabilizing" && (
-                  <div className="bg-slate-950/85 backdrop-blur-md px-3 py-1 rounded-full border border-indigo-500/40 text-xs font-semibold text-indigo-300 flex items-center gap-1.5 shadow-lg">
-                    <span>Hold still</span>
-                    <span className="font-mono">{Math.round(detection.stabilityProgress * 100)}%</span>
-                  </div>
-                )}
+                  className={`w-2.5 h-2.5 rounded-full ${
+                    detection.state === "capturing"
+                      ? "bg-emerald-500 animate-ping"
+                      : detection.state === "stabilizing"
+                      ? "bg-indigo-500"
+                      : detection.state === "detected"
+                      ? "bg-sky-400"
+                      : "bg-amber-400"
+                  }`}
+                />
+                <span>{detection.stateMessage}</span>
               </div>
 
-              {/* Stability Progress Bar across bottom */}
               {detection.state === "stabilizing" && (
-                <div className="absolute bottom-0 inset-x-0 h-1.5 bg-slate-800 z-10">
-                  <div
-                    className="h-full bg-gradient-to-r from-indigo-500 to-emerald-400 transition-all duration-100"
-                    style={{ width: `${detection.stabilityProgress * 100}%` }}
-                  />
+                <div className="bg-slate-950/85 backdrop-blur-md px-3 py-1 rounded-full border border-indigo-500/40 text-xs font-semibold text-indigo-300 flex items-center gap-1.5 shadow-lg">
+                  <span>Hold steady</span>
+                  <span className="font-mono">{Math.round(detection.stabilityProgress * 100)}%</span>
                 </div>
               )}
             </div>
 
-            {/* Manual Controls Toolbar */}
-            <div className="mt-5 flex items-center justify-center gap-4 w-full max-w-md">
-              <button
-                type="button"
-                onClick={handleManualCapture}
-                className="flex-1 py-3 px-5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm shadow-lg shadow-indigo-600/25 transition-all flex items-center justify-center gap-2 active:scale-95"
-              >
-                <Camera className="w-4 h-4" />
-                <span>Capture Now (Manual)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => startCamera()}
-                className="p-3 rounded-2xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition-all"
-                title="Restart Camera"
-              >
-                <RotateCcw className="w-4 h-4" />
-              </button>
-            </div>
+            {/* Stability Progress Bar across bottom */}
+            {detection.state === "stabilizing" && (
+              <div className="absolute bottom-0 inset-x-0 h-1.5 bg-slate-800 z-10">
+                <div
+                  className="h-full bg-gradient-to-r from-indigo-500 to-emerald-400 transition-all duration-100"
+                  style={{ width: `${detection.stabilityProgress * 100}%` }}
+                />
+              </div>
+            )}
           </div>
-        )}
+
+          {/* Manual Controls Toolbar */}
+          <div className="mt-5 flex items-center justify-center gap-4 w-full max-w-md">
+            <button
+              type="button"
+              onClick={handleManualCapture}
+              disabled={isManualCapturing}
+              className="flex-1 py-3 px-5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-700 text-white font-semibold text-sm shadow-lg shadow-indigo-600/25 transition-all flex items-center justify-center gap-2 active:scale-95"
+            >
+              {isManualCapturing ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Capturing...</span>
+                </>
+              ) : (
+                <>
+                  <Camera className="w-4 h-4" />
+                  <span>Capture Now (Manual)</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => startCamera()}
+              className="p-3 rounded-2xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition-all active:scale-95"
+              title="Restart Camera"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
 
         {/* STEP 2: FLIP CARD PROMPT (Double-Sided Workflow) */}
         {step === "awaiting_back" && frontCapture && (
@@ -617,7 +682,7 @@ export default function ScanPage() {
               <button
                 type="button"
                 onClick={() => handleRetake("front")}
-                className="flex-1 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs border border-slate-700 transition-all flex items-center justify-center gap-1.5"
+                className="flex-1 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs border border-slate-700 transition-all flex items-center justify-center gap-1.5 active:scale-95"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
                 <span>Retake Front</span>
@@ -626,7 +691,7 @@ export default function ScanPage() {
               <button
                 type="button"
                 onClick={handleStartBackScan}
-                className="flex-2 py-3 px-6 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2"
+                className="flex-2 py-3 px-6 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 active:scale-95"
               >
                 <FlipHorizontal className="w-4 h-4" />
                 <span>Flip Card & Scan Back</span>
@@ -724,7 +789,7 @@ export default function ScanPage() {
                 type="button"
                 onClick={() => handleRetake("front")}
                 disabled={isUploading}
-                className="flex-1 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs border border-slate-700 transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                className="flex-1 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs border border-slate-700 transition-all flex items-center justify-center gap-1.5 disabled:opacity-50 active:scale-95"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
                 <span>Retake</span>
@@ -734,7 +799,7 @@ export default function ScanPage() {
                 type="button"
                 onClick={handleAcceptAndSave}
                 disabled={isUploading}
-                className="flex-2 py-3.5 px-6 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-lg shadow-emerald-600/30 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                className="flex-2 py-3.5 px-6 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-lg shadow-emerald-600/30 transition-all flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95"
               >
                 {isUploading ? (
                   <>
@@ -777,7 +842,7 @@ export default function ScanPage() {
               <button
                 type="button"
                 onClick={handleScanAnother}
-                className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2"
+                className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2 active:scale-95"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Scan Another Card</span>
@@ -786,7 +851,7 @@ export default function ScanPage() {
               <button
                 type="button"
                 onClick={() => router.push("/")}
-                className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition-all"
+                className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition-all active:scale-95"
               >
                 Finish Session
               </button>
