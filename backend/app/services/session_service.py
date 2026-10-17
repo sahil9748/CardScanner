@@ -10,6 +10,7 @@ from app.core.security import generate_session_token
 from app.core.config import settings
 from app.storage.factory import get_storage
 from app.vision.validator import validate_image_upload, create_thumbnail
+from app.vision.cropper import auto_crop_card
 from app.services.audit_service import record_audit_log
 
 
@@ -114,7 +115,15 @@ class SessionService:
         if side == "back" and session.card_type != "double":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Back image only permitted for two-sided cards")
 
-        # 1. Validate images
+        # 1. Run server-side auto-cropping & rectification on original image
+        try:
+            server_cropped = auto_crop_card(original_bytes)
+            if server_cropped and len(server_cropped) > 200:
+                processed_bytes = server_cropped
+        except Exception as e:
+            # Fallback to provided client cropped bytes if OpenCV encountered an issue
+            pass
+
         orig_meta = validate_image_upload(original_bytes)
         proc_meta = validate_image_upload(processed_bytes)
 

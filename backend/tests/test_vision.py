@@ -36,3 +36,14 @@ def test_create_thumbnail(test_image_bytes):
     with Image.open(io.BytesIO(thumb)) as img:
         assert img.width <= 200
         assert img.height <= 150
+
+
+def test_auto_crop_card(test_image_bytes):
+    from app.vision.cropper import auto_crop_card
+    cropped = auto_crop_card(test_image_bytes)
+    assert len(cropped) > 0
+    with Image.open(io.BytesIO(cropped)) as img:
+        # Standard card ratio is ~1.586
+        aspect = img.width / float(img.height)
+        assert 1.30 <= aspect <= 1.85
+
