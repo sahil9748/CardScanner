@@ -67,6 +67,8 @@ fi
 # 3. Build & Restart Updated Containers
 log_info "Rebuilding and restarting updated containers..."
 $COMPOSE_CMD up -d --build
+log_info "Reloading reverse proxy configuration..."
+$COMPOSE_CMD restart proxy || true
 
 # 4. Verify Migrations
 log_info "Ensuring database migrations are up to date..."

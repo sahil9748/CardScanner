@@ -1,14 +1,55 @@
-# CardScan Production Caddyfile - Automatic SSL & Reverse Proxy
+# ==============================================================================
+# CARDSCAN PRODUCTION CADDYFILE
+# Universal Reverse Proxy - Compatible with Cloudflare CDN, Direct IP, & Domain
+# ==============================================================================
+
 {
-    email {$ACME_EMAIL:admin@cardscan.local}
     admin off
 }
 
-{$DOMAIN:localhost} {
-    # Response compression
+# HTTP Handler (Port 80)
+# Serves application directly over HTTP, handles direct IP access,
+# and supports Cloudflare "Flexible" SSL mode without redirect loops.
+:80 {
     encode zstd gzip
 
-    # Request body limit for high-resolution gift card image uploads (35 MB)
+    # Request body limit for high-resolution gift card scans (35 MB)
+    request_body {
+        max_size 35MB
+    }
+
+    # Route /api/ directly to FastAPI backend service
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Route all other traffic to Next.js frontend
+    handle {
+        reverse_proxy frontend:3000
+    }
+
+    # Security Headers
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+}
+
+# HTTPS Handler (Port 443)
+# Uses internal self-signed TLS so that Cloudflare "Full" SSL mode
+# completes the SSL/TLS handshake immediately without ACME challenge failures.
+:443 {
+    tls internal
+
+    encode zstd gzip
+
+    # Request body limit for high-resolution gift card scans (35 MB)
     request_body {
         max_size 35MB
     }
